@@ -140,8 +140,8 @@ def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
     return "Neutral"
 
-# --- 6. DASHBOARD COMPONENT ---
-@st.fragment(run_every=60)
+# --- 6. DASHBOARD COMPONENT (AUTO-REFRESH: 5 SECONDS) ---
+@st.fragment(run_every=5)  # <--- CHANGED THIS
 def market_dashboard():
     indices = {
         "NIFTY 50": "NSE_INDEX|Nifty 50",
@@ -191,8 +191,8 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER ENGINE ---
-@st.fragment(run_every=180)
+# --- 7. SCANNER ENGINE (AUTO-REFRESH: 3 MINUTES) ---
+@st.fragment(run_every=180) # <--- KEPT AT 3 MINUTES
 def scanner_engine():
     bullish, bearish = [], []
     progress_bar = st.progress(0, text="Scanning Market (Updates every 3 mins)...")
@@ -258,13 +258,10 @@ def scanner_engine():
         if bearish: st.dataframe(pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
     
-    # --- LEFT ALIGNED FOOTER ---
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
     st.markdown(f"""
         <div style='text-align:left; color:grey; margin-top:20px;'>
             Last Updated: {ist_time}<br>
-        </div>
-        <div style='text-align:center; color:grey; margin-top:20px;'>
             <strong>Powered by : i-Tech World</strong>
         </div>
     """, unsafe_allow_html=True)
