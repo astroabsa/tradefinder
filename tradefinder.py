@@ -1,72 +1,63 @@
 import streamlit as st
-from dhanhq import dhanhq
+import upstox_client
+from upstox_client.rest import ApiException
 import pandas as pd
-from datetime import datetime, timedelta
+import pandas_ta as ta
 
-# --- APP CONFIG ---
-st.set_page_config(page_title="Dhan Connection Test")
-st.title("🕵️ DhanHQ Connection Tester (Final Fix)")
+# --- CONFIGURATION ---
+API_KEY = "085bad90-9701-4f88-a591-95fdfeac8c7e"
+API_SECRET = "8euyjnujw6"
+REDIRECT_URI = "https://tradefinder.streamlit.app" # Defined in your Upstox App settings
 
-# REPLACE THESE WITH YOUR ACTUAL KEYS
-CLIENT_ID = "1104089467"      # e.g., "10000xxxxx"
-ACCESS_TOKEN = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzUxMiJ9.eyJpc3MiOiJkaGFuIiwicGFydG5lcklkIjoiIiwiZXhwIjoxNzY3NTA4NzY0LCJpYXQiOjE3Njc0MjIzNjQsInRva2VuQ29uc3VtZXJUeXBlIjoiU0VMRiIsIndlYmhvb2tVcmwiOiIiLCJkaGFuQ2xpZW50SWQiOiIxMTA0MDg5NDY3In0.al1lcv-txOjq8JY7lUnqCjm2978ZgydGoPlw9n8d2aPjYv2gIDUmOTpgQjiB7Ha91X6VhDuHg1XTIg8FtfwkPA" # Long JWT string from Dhan Web
+st.title("📈 Upstox Live Screener")
 
-def test_dhan_connection():
-    st.info("Testing DhanHQ connection...")
-    
+# --- STEP 1: AUTHENTICATION (The Hard Part) ---
+# You generally need a separate script to generate the ACCESS_TOKEN daily.
+# For this screener, we assume you already have the valid token.
+ACCESS_TOKEN = st.text_input("Enter Today's Access Token", type="password")
+
+if not ACCESS_TOKEN:
+    st.warning("Please generate an access token to proceed.")
+    st.markdown(f"[Login to Generate Code](https://api.upstox.com/v2/login/authorization/dialog?response_type=code&client_id={API_KEY}&redirect_uri={REDIRECT_URI})")
+    st.stop()
+
+# Configure the client
+configuration = upstox_client.Configuration()
+configuration.access_token = ACCESS_TOKEN
+
+# --- STEP 2: FETCHING DATA ---
+def get_upstox_data(instrument_key):
+    api_instance = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
     try:
-        dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
+        # Fetch Intraday 1-minute candles
+        api_response = api_instance.get_historical_candle_data1(
+            instrument_key=instrument_key, 
+            interval='1minute', 
+            to_date='2024-01-01', # Current date
+            api_version='2.0'
+        )
         
-        # 1. LOGIN CHECK
-        st.subheader("1. Login Check")
-        holdings = dhan.get_holdings()
+        if api_response.status == 'success':
+            candles = api_response.data.candles
+            # Convert to DataFrame
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi'])
+            return df
+    except ApiException as e:
+        st.error(f"Error fetching data: {e}")
+        return pd.DataFrame()
+
+# --- STEP 3: SCREENER LOGIC ---
+if st.button("Run Upstox Scan"):
+    # Upstox uses instrument keys like 'NSE_EQ|INE002A01018' (Reliance)
+    # You need a master list mapper similar to what we did for Dhan.
+    
+    df = get_upstox_data('NSE_EQ|INE002A01018') # Example for Reliance
+    
+    if not df.empty:
+        # Calculate RSI/ADX using pandas-ta
+        df['close'] = df['close'].astype(float)
+        df['RSI'] = ta.rsi(df['close'], length=14)
         
-        is_authenticated = False
+        last_rsi = df['RSI'].iloc[0] # Upstox sends data in reverse order often (check docs)
         
-        if holdings['status'] == 'success':
-            st.success("✅ Login SUCCESS! (Holdings found)")
-            is_authenticated = True
-        elif holdings['remarks']['error_code'] == 'DH-1111':
-            st.success("✅ Login SUCCESS! (Connected, but Portfolio is Empty)")
-            is_authenticated = True
-        else:
-            st.error(f"❌ Login Failed. Message: {holdings}")
-            return 
-
-        # 2. DATA FETCH CHECK
-        if is_authenticated:
-            st.subheader("2. Data Fetch Check (Reliance)")
-            st.write("Fetching last 5 days of data...")
-            
-            # --- THE FIX IS HERE ---
-            # We must use 'security_id' (1333), NOT 'symbol' ('RELIANCE')
-            data = dhan.historical_daily_data(
-                security_id='1333',         # <--- CHANGED THIS
-                exchange_segment='NSE_EQ',
-                instrument_type='EQUITY',
-                expiry_code=0,
-                from_date=(datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'),
-                to_date=datetime.now().strftime('%Y-%m-%d')
-            )
-            
-            if data['status'] == 'success' and 'data' in data:
-                if len(data['data']) > 0:
-                    st.success(f"✅ Data Fetch SUCCESS! Retrieved {len(data['data'])} days of data.")
-                    # Convert to DataFrame for pretty display
-                    df = pd.DataFrame(data['data'])
-                    # Convert weird timestamp to readable date if needed
-                    if 'start_Time' in df.columns:
-                        df['Date'] = pd.to_datetime(df['start_Time'], unit='s')
-                        df = df[['Date', 'open', 'high', 'low', 'close', 'volume']]
-                    st.dataframe(df)
-                else:
-                    st.warning("⚠️ Connected, but returned 0 rows. (Check Date Range)")
-            else:
-                st.error("❌ Data Fetch Failed.")
-                st.write(data)
-
-    except Exception as e:
-        st.error(f"❌ CRITICAL ERROR: {e}")
-
-if st.button("Run Connection Test"):
-    test_dhan_connection()
+        st.metric("Reliance RSI", f"{last_rsi:.2f}")
