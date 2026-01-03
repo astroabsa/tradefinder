@@ -6,3 +6,4 @@ streamlit
 yfinance
 pandas
 dhanhq
+upstox-python-sdk
