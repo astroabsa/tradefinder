@@ -140,17 +140,15 @@ def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
     return "Neutral"
 
-# --- 6. DASHBOARD COMPONENT (SENSEX ADDED) ---
+# --- 6. DASHBOARD COMPONENT ---
 @st.fragment(run_every=60)
 def market_dashboard():
-    # Keys for Indices
     indices = {
         "NIFTY 50": "NSE_INDEX|Nifty 50",
         "BANK NIFTY": "NSE_INDEX|Nifty Bank",
-        "SENSEX": "BSE_INDEX|SENSEX" # NEW: Sensex Key
+        "SENSEX": "BSE_INDEX|SENSEX"
     }
     
-    # 4 Columns for 3 Indices + Market Bias
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1.5])
     data = {}
 
@@ -161,7 +159,6 @@ def market_dashboard():
                 ltp = df['close'].iloc[-1]
                 open_today = df[df['timestamp'].dt.date == datetime.now().date()]['open'].min()
                 if pd.isna(open_today): open_today = df['open'].iloc[-10]
-                
                 chg = ltp - open_today
                 pct = (chg / open_today) * 100
                 data[name] = {"ltp": ltp, "pct": pct}
@@ -181,7 +178,6 @@ def market_dashboard():
         st.metric("SENSEX", f"{s['ltp']:,.2f}", f"{s['pct']:.2f}%")
         
     with col4:
-        # Bias Logic based on Nifty
         bias, color = ("SIDEWAYS ↔️", "gray")
         if data["NIFTY 50"]['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
         elif data["NIFTY 50"]['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
@@ -192,7 +188,6 @@ def market_dashboard():
             </div>
         """, unsafe_allow_html=True)
 
-# CALL DASHBOARD
 market_dashboard()
 st.markdown("---")
 
@@ -212,22 +207,18 @@ def scanner_engine():
             df = fetch_upstox_candles(instrument_key)
             
             if df is not None and len(df) > 30:
-                # Indicators
                 df['RSI'] = ta.rsi(df['close'], length=14)
                 adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
                 df['ADX'] = adx_df['ADX_14']
                 df['EMA_5'] = ta.ema(df['close'], length=5)
                 
-                # Logic
                 last, prev = df.iloc[-1], df.iloc[-2]
                 ltp = last['close']
                 curr_rsi, curr_adx, ema_5 = last['RSI'], last['ADX'], last['EMA_5']
                 
-                # OI Logic
                 curr_oi, prev_oi = last['oi'], prev['oi']
                 oi_chg = ((curr_oi - prev_oi) / prev_oi * 100) if prev_oi > 0 else 0
                 
-                # Price Logic
                 day_open = df[df['timestamp'].dt.date == datetime.now().date()]['open'].min()
                 if pd.isna(day_open): day_open = df['open'].iloc[-10]
                 p_change = round(((ltp - day_open) / day_open) * 100, 2)
@@ -267,10 +258,10 @@ def scanner_engine():
         if bearish: st.dataframe(pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
     
-    # --- UPDATED FOOTER ---
+    # --- LEFT ALIGNED FOOTER ---
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
     st.markdown(f"""
-        <div style='text-align:center; color:grey; margin-top:20px;'>
+        <div style='text-align:left; color:grey; margin-top:20px;'>
             Last Updated: {ist_time}<br>
             <strong>Powered by : i-Tech World</strong>
         </div>
