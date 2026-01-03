@@ -12,54 +12,44 @@ import pytz
 
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="Absa's Upstox Pro Screener", layout="wide")
-st.title("🚀 Absa's Live F&O Screener (Upstox Powered)")
+st.title("🚀 Absa's Live F&O Screener Pro")
 
-# --- 2. AUTHENTICATION (Sidebar) ---
-st.sidebar.header("🔐 Upstox Login")
-# Try to load from secrets, otherwise ask user
-default_token = st.secrets.get("UPSTOX_ACCESS_TOKEN", "")
-ACCESS_TOKEN = st.sidebar.text_input("Enter Today's Access Token", value=default_token, type="password")
+# --- 2. AUTHENTICATION (Main Page, No Sidebar) ---
+# Try to load from secrets first to keep UI clean
+ACCESS_TOKEN = st.secrets.get("UPSTOX_ACCESS_TOKEN", "")
+
+# If no secret is found, show a simple input box at the top
+if not ACCESS_TOKEN:
+    with st.expander("🔐 Login (Enter Access Token)", expanded=True):
+        ACCESS_TOKEN = st.text_input("Upstox Access Token", type="password")
 
 if not ACCESS_TOKEN:
-    st.warning("⚠️ Waiting for Access Token...")
+    st.warning("⚠️ Please enter your Access Token to start the scanner.")
     st.stop()
 
 # Configure Upstox Client
 configuration = upstox_client.Configuration()
 configuration.access_token = ACCESS_TOKEN
 api_instance = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
-market_quote_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
 
-# --- 3. SMART MAPPING ENGINE (The Magic Part) ---
-@st.cache_data(ttl=3600*12) # Cache for 12 hours
+# --- 3. SMART MAPPING ENGINE ---
+@st.cache_data(ttl=3600*12) 
 def get_upstox_master_map():
-    """
-    Downloads the massive Upstox Instrument list and creates a 
-    dictionary mapping 'RELIANCE' -> 'NSE_EQ|INE002A01018'
-    """
     url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
     try:
         response = requests.get(url)
         with gzip.GzipFile(fileobj=io.BytesIO(response.content)) as f:
             df = pd.read_json(f)
-        
-        # Filter for Equity and Indices to keep it fast
         df = df[df['segment'] == 'NSE_EQ']
-        
-        # Create Map: {'RELIANCE': 'NSE_EQ|INE...', 'TCS': 'NSE_EQ|INE...'}
         symbol_map = dict(zip(df['trading_symbol'], df['instrument_key']))
         return symbol_map
     except Exception as e:
-        st.error(f"Failed to load Upstox Master List: {e}")
+        st.error(f"Map Error: {e}")
         return {}
 
-# Load the map immediately
-st.sidebar.info("Loading Instrument Keys...")
 SYMBOL_MAP = get_upstox_master_map()
-st.sidebar.success(f"Loaded {len(SYMBOL_MAP)} Instruments!")
 
-# --- 4. GLOBAL SYMBOL LIST (Your Original List) ---
-# We keep the .NS format but strip it during processing
+# --- 4. SYMBOL LIST (Hidden for brevity, same list as before) ---
 FNO_SYMBOLS_RAW = [
     'ABFRL.NS', 'ADANIENSOL.NS', 'ADANIENT.NS', 'ADANIGREEN.NS', 'ADANIPORTS.NS', 'ALKEM.NS', 
     'AUROPHARMA.NS', 'AXISBANK.NS', 'BANDHANBNK.NS', 'BANKBARODA.NS', 'BANKINDIA.NS', 'BDL.NS', 
@@ -91,23 +81,15 @@ FNO_SYMBOLS_RAW = [
     'VOLTAS.NS', 'WIPRO.NS', 'YESBANK.NS', 'ZOMATO.NS', 'ZYDUSLIFE.NS'
 ]
 
-# --- 5. HELPER FUNCTIONS ---
-def get_sentiment(p_chg, oi_chg):
-    if p_chg > 0 and oi_chg > 0: return "Long Buildup 🚀"
-    if p_chg < 0 and oi_chg > 0: return "Short Buildup 📉"
-    if p_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
-    if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
-    return "Neutral"
-
+# --- 5. DATA ENGINE ---
 def fetch_upstox_candles(instrument_key):
     try:
-        # Dynamic Dates (Last 5 days for robust RSI calculation)
         to_date = datetime.now().strftime("%Y-%m-%d")
         from_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         
         api_response = api_instance.get_historical_candle_data1(
             instrument_key=instrument_key,
-            interval='30minute', # Standard Intraday
+            interval='30minute', 
             to_date=to_date,
             from_date=from_date,
             api_version='2.0'
@@ -119,91 +101,40 @@ def fetch_upstox_candles(instrument_key):
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 df[col] = df[col].astype(float)
-            
-            # Sort: Oldest to Newest
             df = df.sort_values('timestamp', ascending=True).reset_index(drop=True)
             return df
-    except:
-        pass
+    except: pass
     return None
 
-# --- 6. FRAGMENT: MARKET DASHBOARD ---
-@st.fragment(run_every=60)
-def market_dashboard():
-    # Hardcoded Upstox Keys for Indices
-    indices = {
-        "NIFTY 50": "NSE_INDEX|Nifty 50",
-        "BANK NIFTY": "NSE_INDEX|Nifty Bank"
-    }
-    
-    col1, col2, col3 = st.columns([1, 1, 2])
-    data = {}
+def get_sentiment(p_chg):
+    if p_chg > 0: return "Bullish 🚀"
+    if p_chg < 0: return "Bearish 📉"
+    return "Neutral"
 
-    for name, key in indices.items():
-        try:
-            # We use the Candle API to get today's move
-            df = fetch_upstox_candles(key)
-            if df is not None and not df.empty:
-                ltp = df['close'].iloc[-1]
-                # Calculate Change from Yesterday's Close (Approx via first candle of today)
-                # Ideally, use Previous Close API, but this is faster for single call
-                open_today = df['open'].iloc[0] 
-                chg = ltp - open_today
-                pct = (chg / open_today) * 100
-                data[name] = {"ltp": ltp, "chg": chg, "pct": pct}
-            else:
-                data[name] = {"ltp": 0, "chg": 0, "pct": 0}
-        except:
-            data[name] = {"ltp": 0, "chg": 0, "pct": 0}
-
-    # Render Metrics
-    with col1:
-        n = data["NIFTY 50"]
-        st.metric("NIFTY 50", f"{n['ltp']:,.2f}", f"{n['pct']:.2f}%")
-    with col2:
-        b = data["BANK NIFTY"]
-        st.metric("BANK NIFTY", f"{b['ltp']:,.2f}", f"{b['pct']:.2f}%")
-    with col3:
-        # Bias Logic
-        bias, color = ("SIDEWAYS ↔️", "gray")
-        if data["NIFTY 50"]['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
-        elif data["NIFTY 50"]['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
-        
-        st.markdown(f"""
-            <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
-                <h3 style="margin:0; color: {color};">Market Bias: {bias}</h3>
-            </div>
-        """, unsafe_allow_html=True)
-
-market_dashboard()
-st.markdown("---")
-
-# --- 7. FRAGMENT: SCANNER ENGINE ---
+# --- 6. SCANNER ENGINE (3-Minute Auto Refresh) ---
 @st.fragment(run_every=180)
 def scanner_engine():
     bullish, bearish = [], []
-    progress_bar = st.progress(0, text="Fetching Upstox Data...")
+    progress_bar = st.progress(0, text="Scanning Market (Updates every 3 mins)...")
+    
+    total = len(FNO_SYMBOLS_RAW)
     
     for i, raw_sym in enumerate(FNO_SYMBOLS_RAW):
         try:
-            # 1. CLEAN SYMBOL & GET KEY
             clean_sym = raw_sym.replace(".NS", "")
             instrument_key = SYMBOL_MAP.get(clean_sym)
             
-            if not instrument_key:
-                continue # Skip if mapping failed
+            if not instrument_key: continue
             
-            # 2. FETCH DATA
             df = fetch_upstox_candles(instrument_key)
             
             if df is not None and len(df) > 30:
-                # 3. INDICATORS
+                # Indicators
                 df['RSI'] = ta.rsi(df['close'], length=14)
                 adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
                 df['ADX'] = adx_df['ADX_14']
                 df['EMA_5'] = ta.ema(df['close'], length=5)
                 
-                # 4. CURRENT VALUES
                 last = df.iloc[-1]
                 ltp = last['close']
                 curr_rsi = last['RSI']
@@ -212,59 +143,69 @@ def scanner_engine():
                 
                 momentum_pct = round(((ltp - ema_5) / ema_5) * 100, 2)
                 
-                # Calculate Day Change
+                # Day Change Logic
                 day_open = df[df['timestamp'].dt.date == datetime.now().date()]['open'].min()
-                if pd.isna(day_open): day_open = df['open'].iloc[-10] # Fallback
+                if pd.isna(day_open): day_open = df['open'].iloc[-10]
                 p_change = round(((ltp - day_open) / day_open) * 100, 2)
                 
-                sentiment = get_sentiment(p_change, 1) # Dummy OI (Upstox Free tier limits OI data sometimes)
-                
-                # Link to TradingView (Generic) or Upstox Pro
-                tv_url = f"https://tv.upstox.com/charts/NSE_EQ|{instrument_key.split('|')[1]}"
+                # TradingView India Link
+                tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{clean_sym}"
                 
                 row = {
-                    "Symbol": clean_sym, # Just text for now
+                    "Symbol": tv_url, # The Link URL
                     "LTP": ltp,
                     "Mom %": momentum_pct,
                     "Chg %": p_change,
                     "RSI": round(curr_rsi, 1),
                     "ADX": round(curr_adx, 1),
-                    "Sentiment": sentiment
+                    "Sentiment": get_sentiment(p_change)
                 }
                 
-                # 5. FILTER LOGIC
+                # Filters
                 if p_change > 0.5 and curr_rsi > 60 and curr_adx > 20:
                     bullish.append(row)
                 elif p_change < -0.5 and curr_rsi < 40 and curr_adx > 20:
                     bearish.append(row)
             
-            # Rate Limit Protection
-            time.sleep(0.05) 
-            progress_bar.progress((i + 1) / len(FNO_SYMBOLS_RAW))
+            # Tiny sleep to respect rate limits
+            time.sleep(0.02)
+            progress_bar.progress((i + 1) / total)
             
-        except Exception as e:
-            # print(f"Error {raw_sym}: {e}")
-            continue
+        except: continue
 
     progress_bar.empty()
     
-    # DISPLAY
+    # --- DISPLAY LOGIC ---
+    # Config to make "Symbol" clickable and show only the name (e.g. "RELIANCE")
+    column_config = {
+        "Symbol": st.column_config.LinkColumn(
+            "Script (Click to Chart)", 
+            display_text="symbol=NSE:(.*)" # Regex to extract name from URL
+        ),
+        "LTP": st.column_config.NumberColumn("Price", format="₹%.2f")
+    }
+    
     c1, c2 = st.columns(2)
     with c1:
         st.success("🟢 ACTIVE BULLS")
         if bullish:
-            st.dataframe(pd.DataFrame(bullish).sort_values(by="Mom %", ascending=False), use_container_width=True, hide_index=True)
+            # Sort by Momentum -> Take Top 10 -> Show
+            df_bull = pd.DataFrame(bullish).sort_values(by="Mom %", ascending=False).head(10)
+            st.dataframe(df_bull, use_container_width=True, hide_index=True, column_config=column_config)
         else:
             st.info("No bullish signals.")
             
     with c2:
         st.error("🔴 ACTIVE BEARS")
         if bearish:
-            st.dataframe(pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True), use_container_width=True, hide_index=True)
+            # Sort by Momentum (Ascending for bears) -> Take Top 10 -> Show
+            df_bear = pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10)
+            st.dataframe(df_bear, use_container_width=True, hide_index=True, column_config=column_config)
         else:
             st.info("No bearish signals.")
             
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
-    st.caption(f"Last Scan: {ist_time}")
+    st.markdown(f"<div style='text-align: center; color: grey;'>Last Updated: {ist_time} (Next update in 3 mins)</div>", unsafe_allow_html=True)
 
+# Run the engine
 scanner_engine()
