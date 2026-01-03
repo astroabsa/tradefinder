@@ -140,16 +140,18 @@ def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
     return "Neutral"
 
-# --- 6. DASHBOARD COMPONENT (RESTORED) ---
+# --- 6. DASHBOARD COMPONENT (SENSEX ADDED) ---
 @st.fragment(run_every=60)
 def market_dashboard():
-    # Hardcoded Keys for Indices (Standard Upstox Keys)
+    # Keys for Indices
     indices = {
         "NIFTY 50": "NSE_INDEX|Nifty 50",
-        "BANK NIFTY": "NSE_INDEX|Nifty Bank"
+        "BANK NIFTY": "NSE_INDEX|Nifty Bank",
+        "SENSEX": "BSE_INDEX|SENSEX" # NEW: Sensex Key
     }
     
-    col1, col2, col3 = st.columns([1, 1, 2])
+    # 4 Columns for 3 Indices + Market Bias
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 1.5])
     data = {}
 
     for name, key in indices.items():
@@ -175,14 +177,18 @@ def market_dashboard():
         b = data["BANK NIFTY"]
         st.metric("BANK NIFTY", f"{b['ltp']:,.2f}", f"{b['pct']:.2f}%")
     with col3:
-        # Bias Logic
+        s = data["SENSEX"]
+        st.metric("SENSEX", f"{s['ltp']:,.2f}", f"{s['pct']:.2f}%")
+        
+    with col4:
+        # Bias Logic based on Nifty
         bias, color = ("SIDEWAYS ↔️", "gray")
         if data["NIFTY 50"]['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
         elif data["NIFTY 50"]['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
         
         st.markdown(f"""
             <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
-                <h3 style="margin:0; color: {color};">Market Bias: {bias}</h3>
+                <h3 style="margin:0; color: {color};">Bias: {bias}</h3>
             </div>
         """, unsafe_allow_html=True)
 
@@ -261,6 +267,13 @@ def scanner_engine():
         if bearish: st.dataframe(pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
     
-    st.markdown(f"<div style='text-align:center; color:grey;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
+    # --- UPDATED FOOTER ---
+    ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
+    st.markdown(f"""
+        <div style='text-align:center; color:grey; margin-top:20px;'>
+            Last Updated: {ist_time}<br>
+            <strong>Powered by : i-Tech World</strong>
+        </div>
+    """, unsafe_allow_html=True)
 
 scanner_engine()
