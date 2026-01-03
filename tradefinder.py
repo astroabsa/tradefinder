@@ -11,7 +11,7 @@ import time
 import pytz
 
 # --- 1. APP CONFIGURATION ---
-st.set_page_config(page_title="Absa's Upstox Pro Screener", layout="wide")
+st.set_page_config(page_title="iTW Live F&O Screener Pro", layout="wide")
 
 # --- 2. AUTHENTICATION SYSTEM (LOGIN) ---
 AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
@@ -34,7 +34,7 @@ if "authenticated" not in st.session_state:
 
 # --- LOGIN GATE ---
 if not st.session_state["authenticated"]:
-    st.title("🔐 Absa's F&O Pro Login")
+    st.title("🔐 iTW Live F&O Screener Pro Login")
     with st.form("login_form"):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -47,7 +47,7 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN APP SETUP ---
-st.title("🚀 Absa's Live F&O Screener Pro")
+st.title("🚀 iTW Live F&O Screener Pro")
 
 if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
@@ -262,6 +262,8 @@ def scanner_engine():
     st.markdown(f"""
         <div style='text-align:left; color:grey; margin-top:20px;'>
             Last Updated: {ist_time}<br>
+        </div>
+        <div style='text-align:center; color:grey; margin-top:20px;'>
             <strong>Powered by : i-Tech World</strong>
         </div>
     """, unsafe_allow_html=True)
