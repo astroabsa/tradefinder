@@ -1,0 +1,8 @@
+st-gsheets-connection
+pandas_market_calendars 
+nselib 
+pandas_ta
+streamlit 
+yfinance
+pandas
+dhanhq
