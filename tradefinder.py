@@ -263,6 +263,8 @@ def scanner_engine():
     st.markdown(f"""
         <div style='text-align:left; color:grey; margin-top:20px;'>
             Last Updated: {ist_time}<br>
+        </div>
+        <div style='text-align:center; color:grey; margin-top:20px;'>
             <strong>Powered by : i-Tech World</strong>
         </div>
     """, unsafe_allow_html=True)
