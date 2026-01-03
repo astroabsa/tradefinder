@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 # --- APP CONFIG ---
 st.set_page_config(page_title="Dhan Connection Test")
-st.title("🕵️ DhanHQ Connection Tester (Smart)")
+st.title("🕵️ DhanHQ Connection Tester (Final Fix)")
 
 # REPLACE THESE WITH YOUR ACTUAL KEYS
 CLIENT_ID = "1104089467"      # e.g., "10000xxxxx"
@@ -17,11 +17,10 @@ def test_dhan_connection():
     try:
         dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
         
-        # 1. CHECK LOGIN (Smart Check)
+        # 1. LOGIN CHECK
         st.subheader("1. Login Check")
         holdings = dhan.get_holdings()
         
-        # Check for Success OR the specific "Empty Portfolio" error
         is_authenticated = False
         
         if holdings['status'] == 'success':
@@ -29,19 +28,20 @@ def test_dhan_connection():
             is_authenticated = True
         elif holdings['remarks']['error_code'] == 'DH-1111':
             st.success("✅ Login SUCCESS! (Connected, but Portfolio is Empty)")
-            st.info("The API is working. You just don't have any long-term stocks yet.")
             is_authenticated = True
         else:
             st.error(f"❌ Login Failed. Message: {holdings}")
             return 
 
-        # 2. CHECK HISTORICAL DATA
+        # 2. DATA FETCH CHECK
         if is_authenticated:
             st.subheader("2. Data Fetch Check (Reliance)")
             st.write("Fetching last 5 days of data...")
             
+            # --- THE FIX IS HERE ---
+            # We must use 'security_id' (1333), NOT 'symbol' ('RELIANCE')
             data = dhan.historical_daily_data(
-                symbol='RELIANCE',
+                security_id='1333',         # <--- CHANGED THIS
                 exchange_segment='NSE_EQ',
                 instrument_type='EQUITY',
                 expiry_code=0,
@@ -52,7 +52,13 @@ def test_dhan_connection():
             if data['status'] == 'success' and 'data' in data:
                 if len(data['data']) > 0:
                     st.success(f"✅ Data Fetch SUCCESS! Retrieved {len(data['data'])} days of data.")
-                    st.dataframe(pd.DataFrame(data['data']))
+                    # Convert to DataFrame for pretty display
+                    df = pd.DataFrame(data['data'])
+                    # Convert weird timestamp to readable date if needed
+                    if 'start_Time' in df.columns:
+                        df['Date'] = pd.to_datetime(df['start_Time'], unit='s')
+                        df = df[['Date', 'open', 'high', 'low', 'close', 'volume']]
+                    st.dataframe(df)
                 else:
                     st.warning("⚠️ Connected, but returned 0 rows. (Check Date Range)")
             else:
@@ -62,5 +68,5 @@ def test_dhan_connection():
     except Exception as e:
         st.error(f"❌ CRITICAL ERROR: {e}")
 
-if st.button("Run Smart Connection Test"):
+if st.button("Run Connection Test"):
     test_dhan_connection()
