@@ -55,15 +55,13 @@ configuration.access_token = ACCESS_TOKEN
 history_api = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
 quote_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
 
-# --- 4. HARDCODED KEYS (100% Reliable) ---
-# We manually define the keys to avoid mapper errors
+# --- 4. HARDCODED KEYS (Verified ISINs) ---
 INDICES = {
     "NIFTY 50": "NSE_INDEX|Nifty 50",
     "BANK NIFTY": "NSE_INDEX|Nifty Bank",
     "SENSEX": "BSE_INDEX|SENSEX"
 }
 
-# Top F&O Stocks with Verified Keys
 STOCKS = {
     "RELIANCE": "NSE_EQ|INE002A01018",
     "TCS": "NSE_EQ|INE467B01029",
@@ -89,17 +87,35 @@ STOCKS = {
 
 # --- 5. FUNCTIONS ---
 
-def fetch_live_quotes(keys_list):
+def fetch_live_batch(keys_list, mode='LTP'):
+    """
+    Fetches data in small batches to prevent total failure.
+    mode='LTP' (Stocks) or 'OHLC' (Indices)
+    """
     if not keys_list: return {}
-    try:
-        keys_str = ",".join(keys_list)
-        # Using FULL market quote as it works best with NSE_EQ keys
-        response = quote_api.get_full_market_quote(symbol=keys_str, api_version='2.0')
-        if response.status == 'success':
-            return response.data
-    except Exception as e:
-        if SHOW_DEBUG: st.error(f"API Error: {e}")
-    return {}
+    
+    combined_data = {}
+    BATCH_SIZE = 10 # Request 10 at a time
+    
+    for i in range(0, len(keys_list), BATCH_SIZE):
+        batch = keys_list[i:i+BATCH_SIZE]
+        keys_str = ",".join(batch)
+        
+        try:
+            if mode == 'LTP':
+                # Use LTP endpoint for Stocks (Lighter)
+                response = quote_api.get_market_quote_ltp(symbol=keys_str, api_version='2.0')
+            else:
+                # Use OHLC endpoint for Indices (Need Open Price)
+                response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
+                
+            if response.status == 'success':
+                combined_data.update(response.data)
+                
+        except Exception as e:
+            if SHOW_DEBUG: st.warning(f"Batch Failed: {e}")
+            
+    return combined_data
 
 def fetch_history(key):
     try:
@@ -117,8 +133,8 @@ def fetch_history(key):
     except: pass
     return None
 
-def extract_data_robust(response_data, target_key):
-    """Robust extraction for both Dict and Object responses"""
+def extract_price_robust(response_data, target_key):
+    """Robust extraction for LTP"""
     ltp, ref_price = 0.0, 0.0
     if not response_data: return 0.0, 0.0
 
@@ -136,25 +152,27 @@ def extract_data_robust(response_data, target_key):
 
     # 2. Extract
     try:
+        # Dictionary Access
         if isinstance(data_item, dict):
             ltp = float(data_item.get('last_price', 0))
             ohlc = data_item.get('ohlc', {})
-            # Use OPEN for % Change reference
             ref_price = float(ohlc.get('open', 0))
-            if ref_price == 0: ref_price = float(ohlc.get('close', 0))
+        # Object Access
         else:
             ltp = float(data_item.last_price)
-            ref_price = float(data_item.ohlc.open)
-            if ref_price == 0: ref_price = float(data_item.ohlc.close)
+            # Try/Except for OHLC as LTP endpoint might not have it
+            try: ref_price = float(data_item.ohlc.open)
+            except: pass
+            
     except: pass
 
     return ltp, ref_price
 
-# --- 6. DASHBOARD ---
+# --- 6. DASHBOARD (Indices) ---
 @st.fragment(run_every=2)
 def market_dashboard():
-    # Fetch Data
-    live_data = fetch_live_quotes(list(INDICES.values()))
+    # Use OHLC for indices (We need Open price for %)
+    live_data = fetch_live_batch(list(INDICES.values()), mode='OHLC')
     
     if SHOW_DEBUG:
         with st.expander("🔍 Raw Dashboard Data", expanded=False):
@@ -162,9 +180,9 @@ def market_dashboard():
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
-    n_ltp, n_open = extract_data_robust(live_data, INDICES["NIFTY 50"])
-    b_ltp, b_open = extract_data_robust(live_data, INDICES["BANK NIFTY"])
-    s_ltp, s_open = extract_data_robust(live_data, INDICES["SENSEX"])
+    n_ltp, n_open = extract_price_robust(live_data, INDICES["NIFTY 50"])
+    b_ltp, b_open = extract_price_robust(live_data, INDICES["BANK NIFTY"])
+    s_ltp, s_open = extract_price_robust(live_data, INDICES["SENSEX"])
 
     n_pct = ((n_ltp - n_open)/n_open)*100 if n_open > 0 else 0
     b_pct = ((b_ltp - b_open)/b_open)*100 if b_open > 0 else 0
@@ -183,7 +201,7 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER ---
+# --- 7. SCANNER (Stocks) ---
 @st.fragment(run_every=180) 
 def scanner():
     bulls, bears = [], []
@@ -191,17 +209,18 @@ def scanner():
     
     valid_keys = list(STOCKS.values())
     
-    # 1. BATCH FETCH LIVE PRICES
-    live_quotes = fetch_live_quotes(valid_keys)
+    # 1. BATCH FETCH (LTP MODE - Faster/Safer)
+    live_quotes = fetch_live_batch(valid_keys, mode='LTP')
     
     if SHOW_DEBUG:
-        with st.expander("🔍 Raw Scanner Data", expanded=True):
+        with st.expander("🔍 Scanner Debug (LTP Data)", expanded=True):
+            st.write(f"Fetched {len(live_quotes)} items from API.")
             st.write(live_quotes)
     
     for i, (name, key) in enumerate(STOCKS.items()):
         try:
-            # 2. LIVE PRICE (Robust)
-            ltp, _ = extract_data_robust(live_quotes, key)
+            # 2. LIVE PRICE
+            ltp, _ = extract_price_robust(live_quotes, key)
             
             # 3. HISTORY (Indicators)
             df = fetch_history(key)
@@ -233,7 +252,7 @@ def scanner():
                 "ADX": round(last['ADX'], 2)
             }
             
-            # 5. FILTER (Relaxed slightly to ensure data visibility)
+            # 5. FILTER (Relaxed for testing)
             if mom_pct > 0.1 and last['RSI'] > 55: bulls.append(row)
             elif mom_pct < -0.1 and last['RSI'] < 45: bears.append(row)
             
