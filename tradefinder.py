@@ -9,31 +9,26 @@ import time
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
 
-# --- 2. DHAN API CREDENTIALS ---
-# Ideally, store these in Streamlit secrets (.streamlit/secrets.toml)
-# For now, you can input them in the sidebar if not found in secrets
-client_id = st.sidebar.text_input("Dhan Client ID", type="default")
-access_token = st.sidebar.text_input("Dhan Access Token", type="password")
-
+# --- 2. DHAN API CREDENTIALS (FROM SECRETS) ---
 dhan = None
-if client_id and access_token:
-    try:
-        dhan = dhanhq(client_id, access_token)
-    except Exception as e:
-        st.error(f"Failed to connect to Dhan API: {e}")
+try:
+    # Fetching credentials securely from secrets.toml
+    client_id = st.secrets["DHAN_CLIENT_ID"]
+    access_token = st.secrets["DHAN_ACCESS_TOKEN"]
+    
+    # Initialize DhanHQ
+    dhan = dhanhq(client_id, access_token)
+except Exception as e:
+    st.error(f"⚠️ API Error: Could not load credentials from secrets.toml. Details: {e}")
+    st.stop()
 
 # --- 3. GLOBAL SYMBOL LIST (MAPPED FOR DHAN) ---
-# Dhan uses specific Security IDs. We need a way to map Symbols -> Security IDs.
-# For simplicity, we will fetch the master scrip list or use a reduced hardcoded map for testing.
-# In a production app, you should download the CSV from Dhan (https://images.dhan.co/api-data/api-scrip-master.csv)
-# and cache it.
-
 @st.cache_data(ttl=86400) # Cache for 1 day
 def get_dhan_master_list():
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         df = pd.read_csv(url)
-        # Filter for NSE Equity (EQ) or Futures as needed. Using EQ for spot prices.
+        # Filter for NSE Equity (EQ)
         df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'EQUITY')]
         return df[['SEM_SMST_SECURITY_ID', 'SEM_TRADING_SYMBOL']]
     except Exception as e:
@@ -42,14 +37,13 @@ def get_dhan_master_list():
 
 # Helper to find Security ID
 def get_security_id(symbol, master_df):
-    # Standardize symbol format (remove .NS if present)
     clean_sym = symbol.replace('.NS', '')
     row = master_df[master_df['SEM_TRADING_SYMBOL'] == clean_sym]
     if not row.empty:
         return row.iloc[0]['SEM_SMST_SECURITY_ID']
     return None
 
-# User's Original List (Truncated for speed in example, but full list works)
+# User's Symbol List
 FNO_SYMBOLS_RAW = [
     'ABFRL.NS', 'ADANIENT.NS', 'ADANIPORTS.NS', 'AXISBANK.NS', 'BANDHANBNK.NS', 
     'BANKBARODA.NS', 'BHARTIARTL.NS', 'BPCL.NS', 'BRITANNIA.NS', 'CIPLA.NS', 
@@ -61,7 +55,6 @@ FNO_SYMBOLS_RAW = [
     'SUNPHARMA.NS', 'TATACONSUM.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TCS.NS', 
     'TECHM.NS', 'TITAN.NS', 'ULTRACEMCO.NS', 'UPL.NS', 'WIPRO.NS'
 ]
-# (You can paste your full list back here)
 
 # --- 4. AUTHENTICATION (Web CSV Method) ---
 def authenticate_user(user_in, pw_in):
@@ -101,10 +94,6 @@ if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-if not dhan:
-    st.warning("⚠️ Please enter your Dhan Client ID and Access Token in the sidebar to fetch live data.")
-    st.stop()
-
 # Load Master List
 master_list = get_dhan_master_list()
 if master_list.empty:
@@ -120,13 +109,11 @@ def get_sentiment(p_chg, oi_chg):
 
 # --- HELPER: FETCH INTRADAY DATA FROM DHAN ---
 def fetch_dhan_data(security_id):
-    """Fetches intraday data for the last 5 days to calculate indicators"""
+    """Fetches intraday data for the last 5 days"""
     try:
-        # Dhan needs explicit dates
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         
-        # Fetch Minute Charts (e.g., 60 minute interval for 1H candles as per your original code)
         # Dhan Interval Map: 1 (1min), 5, 15, 25, 60
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
@@ -140,8 +127,6 @@ def fetch_dhan_data(security_id):
         if res['status'] == 'success':
             data = res['data']
             df = pd.DataFrame(data)
-            # Rename columns to match pandas_ta expectations
-            # Dhan returns: start_Time, open, high, low, close, volume
             df.rename(columns={
                 'start_Time': 'datetime', 
                 'open': 'Open', 
@@ -150,45 +135,30 @@ def fetch_dhan_data(security_id):
                 'close': 'Close',
                 'volume': 'Volume'
             }, inplace=True)
-            
-            # Convert Dhan's custom time format (often int or float timestamp)
-            # Dhan usually returns a specialized time format, ensure it's handled:
-            # If start_Time is distinct, it might need conversion. Assuming standard response.
             return df
         else:
             return pd.DataFrame()
             
     except Exception as e:
-        # st.error(f"Data fetch error: {e}")
         return pd.DataFrame()
 
 # --- HELPER: MARKET DASHBOARD ---
 def fetch_market_dashboard():
-    # Hardcoded IDs for Nifty 50 and Bank Nifty (Indices are usually in NSE_IDX segment)
-    # You might need to check the Master List for exact Index Security IDs if these change.
-    # Nifty 50 ID: 13, Bank Nifty ID: 25 (These are standard, but check csv)
+    # Nifty 50 ID: 13, Bank Nifty ID: 25
     indices = {"NIFTY 50": "13", "BANK NIFTY": "25"} 
     
     col1, col2, col3 = st.columns([1, 1, 2])
-    
     data_display = {}
     
     for name, sec_id in indices.items():
         try:
-            # Fetch Quote for Indices
-            # Note: For Indices, exchange_segment is usually 'IDX_I' (Index) or 'NSE_IDX'
-            # Dhan Python Lib might use 'NSE_FNO' or specific segment for Index quotes.
-            # Using basic quote or OHLC call.
-            res = dhan.get_fund_limits() # Dummy call to check conn, replace with actual quote
-            
-            # Since fetching single Index quote might be tricky with generic lib, 
-            # we try fetching minute data for the index to get LTP
             to_date = datetime.now().strftime('%Y-%m-%d')
+            # Using interval 1 to get latest minute candle for LTP
             res = dhan.intraday_minute_data(sec_id, 'IDX_I', 'INDEX', to_date, to_date, 1)
             
             if res['status'] == 'success' and len(res['data']['close']) > 0:
                 ltp = res['data']['close'][-1]
-                prev = res['data']['open'][0] # Approx prev for intraday calc
+                prev = res['data']['open'][0] 
                 chg = ltp - prev
                 pct = (chg / prev) * 100
                 data_display[name] = {"ltp": ltp, "chg": chg, "pct": pct}
@@ -227,42 +197,29 @@ def refreshable_data_tables():
     
     for i, sym in enumerate(FNO_SYMBOLS_RAW):
         try:
-            # 1. Get Security ID
             sec_id = get_security_id(sym, master_list)
-            if not sec_id:
-                continue
+            if not sec_id: continue
 
-            # 2. Fetch History
             df = fetch_dhan_data(sec_id)
             
             if not df.empty and len(df) > 20:
-                # 3. Calculate Indicators
+                # Indicators
                 df['RSI'] = ta.rsi(df['Close'], length=14)
                 adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
                 df['EMA_5'] = ta.ema(df['Close'], length=5)
                 
-                # Get latest values
                 ltp = df['Close'].iloc[-1]
                 ema_5 = df['EMA_5'].iloc[-1]
                 curr_rsi = df['RSI'].iloc[-1]
                 curr_adx = adx_df['ADX_14'].iloc[-1]
                 
-                # Momentum & Change
                 momentum_pct = round(((ltp - ema_5) / ema_5) * 100, 2)
-                
-                # Approximate previous close from the start of the fetched data or previous candle
-                # For better accuracy, you might fetch daily candle history separately.
-                # Here we compare with the open of the first candle of the day/period fetched.
                 prev_close = df['Close'].iloc[-2] 
                 p_change = round(((ltp - prev_close) / prev_close) * 100, 2)
                 
-                # Formatting
                 clean_sym = sym.replace(".NS", "")
                 tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{clean_sym}"
                 
-                # Basic OI simulation (Dhan Equity doesn't have OI, need F&O segment for that)
-                # If you need true OI, you must fetch the corresponding Futures Instrument ID
-                # For now, we keep OI neutral as we are scanning Spot prices.
                 oi_chg = 1 
                 sentiment = get_sentiment(p_change, oi_chg)
                 
@@ -282,12 +239,9 @@ def refreshable_data_tables():
                     bearish.append(row)
             
             progress_bar.progress((i + 1) / len(FNO_SYMBOLS_RAW))
-            
-            # Rate limiting to avoid hitting Dhan API limits (usually quite generous, but good practice)
             time.sleep(0.1) 
             
-        except Exception as e:
-            # st.write(f"Error processing {sym}: {e}") # Debugging
+        except Exception:
             continue
             
     progress_bar.empty()
@@ -298,7 +252,7 @@ def refreshable_data_tables():
     
     col1, col2 = st.columns(2)
     with col1:
-        st.success("🟢 ACTIVE BULLS (Accelerating Up)")
+        st.success("🟢 ACTIVE BULLS")
         if bullish:
             st.dataframe(
                 pd.DataFrame(bullish).sort_values(by="Mom %", ascending=False).head(10), 
@@ -308,7 +262,7 @@ def refreshable_data_tables():
             st.info("No bullish breakouts detected.")
 
     with col2:
-        st.error("🔴 ACTIVE BEARS (Accelerating Down)")
+        st.error("🔴 ACTIVE BEARS")
         if bearish:
             st.dataframe(
                 pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), 
@@ -321,5 +275,4 @@ def refreshable_data_tables():
     st.write(f"🕒 **Last Data Sync:** {ist_time} IST (Auto-refreshing in 3 mins)")
     st.markdown("<div style='text-align: center; color: grey; padding-top: 20px;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
 
-if dhan:
-    refreshable_data_tables()
+refreshable_data_tables()
