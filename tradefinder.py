@@ -96,6 +96,7 @@ def fetch_live_quotes(keys_list):
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
+        # Using OHLC endpoint (1d interval)
         response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
         if response.status == 'success':
             return response.data
@@ -121,19 +122,18 @@ def fetch_history(key):
 
 def extract_data_robust(response_data, target_key):
     """
-    Robustly extracts LTP and % Change from API response.
-    Handles fuzzy key matching and Dict/Object differences.
+    Robustly extracts LTP and % Change.
+    Used by BOTH Dashboard and Scanner for consistency.
     """
     ltp, pct = 0.0, 0.0
     if not response_data: return ltp, pct
 
-    # 1. Find the correct data object (Fuzzy Match)
+    # 1. Fuzzy Match Key
     data_item = None
     if target_key in response_data:
         data_item = response_data[target_key]
     else:
-        # Fallback: Check if target key part exists in any response key
-        # e.g. "Nifty 50" inside "NSE_INDEX|Nifty 50"
+        # Fallback: Search for matching token inside response keys
         target_part = target_key.split("|")[-1]
         for k, v in response_data.items():
             if target_part in str(k):
@@ -142,29 +142,27 @@ def extract_data_robust(response_data, target_key):
     
     if not data_item: return 0.0, 0.0
 
-    # 2. Extract Values (Handle Dict vs Object)
+    # 2. Extract Values
     try:
-        # Assume Dict first
+        # Handle Dict
         if isinstance(data_item, dict):
             ltp = float(data_item.get('last_price', 0))
             ohlc = data_item.get('ohlc', {})
             open_price = float(ohlc.get('open', 0))
             close_price = float(ohlc.get('close', 0))
+        # Handle Object
         else:
-            # Fallback to Object
             ltp = float(data_item.last_price)
             open_price = float(data_item.ohlc.open)
             close_price = float(data_item.ohlc.close)
 
-        # 3. Calculate % Change
-        # Use OPEN price for intraday change because 'close' might be same as LTP
+        # 3. Calculate % Change (Using OPEN for accuracy)
         ref_price = open_price if open_price > 0 else close_price
         
         if ref_price > 0:
             pct = ((ltp - ref_price) / ref_price) * 100
             
-    except Exception:
-        pass
+    except Exception: pass
 
     return ltp, pct
 
@@ -223,15 +221,14 @@ def scanner():
     
     for i, key in enumerate(valid_keys):
         try:
-            # 1. ROBUST PRICE EXTRACTION
-            # Use the same helper to ensure we find the price even if keys are fuzzy
+            # 1. LIVE PRICE (Using the same robust helper!)
             ltp, _ = extract_data_robust(live_quotes, key)
             
-            # 2. HISTORY FETCH
+            # 2. HISTORY
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
-            # Fallback if live fetch failed completely
+            # Fallback if live failed
             if ltp == 0: ltp = df.iloc[-1]['close']
             
             # 3. INDICATORS
