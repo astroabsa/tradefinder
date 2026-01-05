@@ -11,7 +11,7 @@ import time
 import pytz
 
 # --- 1. APP CONFIGURATION ---
-st.set_page_config(page_title="iTW Live F&O Screener Pro", layout="wide")
+st.set_page_config(page_title="Absa's Upstox Pro Screener", layout="wide")
 
 # --- 2. AUTHENTICATION SYSTEM (LOGIN) ---
 AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
@@ -34,7 +34,7 @@ if "authenticated" not in st.session_state:
 
 # --- LOGIN GATE ---
 if not st.session_state["authenticated"]:
-    st.title("🔐 iTW Live F&O Screener Pro Login")
+    st.title("🔐 Absa's F&O Pro Login")
     with st.form("login_form"):
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
@@ -47,7 +47,7 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN APP SETUP ---
-st.title("🚀 iTW Live F&O Screener Pro")
+st.title("🚀 Absa's Live F&O Screener Pro")
 
 if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
@@ -63,9 +63,12 @@ if not ACCESS_TOKEN:
     st.warning("⚠️ Waiting for Access Token...")
     st.stop()
 
+# INIT CLIENTS
 configuration = upstox_client.Configuration()
 configuration.access_token = ACCESS_TOKEN
 api_instance = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
+# NEW: Market Quote API for Real-Time Data
+quote_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration)) 
 
 # --- 4. SMART MAPPER & SYMBOLS ---
 @st.cache_data(ttl=3600*12) 
@@ -114,7 +117,9 @@ FNO_SYMBOLS_RAW = [
 ]
 
 # --- 5. CORE FUNCTIONS ---
-def fetch_upstox_candles(instrument_key):
+
+# A. HISTORICAL DATA (For Indicators like RSI/ADX) - Has Lag
+def fetch_upstox_history(instrument_key):
     try:
         to_date = datetime.now().strftime("%Y-%m-%d")
         from_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
@@ -133,6 +138,21 @@ def fetch_upstox_candles(instrument_key):
     except: pass
     return None
 
+# B. LIVE QUOTE DATA (For Price & % Change) - No Lag
+def fetch_live_quotes(instrument_keys_list):
+    """Fetches real-time snapshot of LTP and OHLC for a list of keys"""
+    try:
+        # Join keys with comma (Upstox accepts up to 500 keys)
+        keys_str = ",".join(instrument_keys_list)
+        response = quote_api.get_full_market_quote(keys_str, '2.0')
+        
+        if response.status == 'success':
+            return response.data # Returns a dictionary keyed by instrument_key
+    except Exception as e:
+        # print(f"Quote Error: {e}") 
+        pass
+    return {}
+
 def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg > 0: return "Long Buildup 🚀"
     if p_chg < 0 and oi_chg > 0: return "Short Buildup 📉"
@@ -140,8 +160,8 @@ def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
     return "Neutral"
 
-# --- 6. DASHBOARD COMPONENT (AUTO-REFRESH: 5 SECONDS) ---
-@st.fragment(run_every=5)  # <--- CHANGED THIS
+# --- 6. DASHBOARD COMPONENT (REAL-TIME) ---
+@st.fragment(run_every=5) 
 def market_dashboard():
     indices = {
         "NIFTY 50": "NSE_INDEX|Nifty 50",
@@ -149,38 +169,42 @@ def market_dashboard():
         "SENSEX": "BSE_INDEX|SENSEX"
     }
     
+    # FETCH REAL-TIME QUOTES FOR INDICES
+    live_data = fetch_live_quotes(list(indices.values()))
+    
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1.5])
-    data = {}
-
+    
+    # Process NIFTY for Bias
+    nifty_key = indices["NIFTY 50"]
+    nifty_pct = 0
+    
     for name, key in indices.items():
-        try:
-            df = fetch_upstox_candles(key)
-            if df is not None and not df.empty:
-                ltp = df['close'].iloc[-1]
-                open_today = df[df['timestamp'].dt.date == datetime.now().date()]['open'].min()
-                if pd.isna(open_today): open_today = df['open'].iloc[-10]
-                chg = ltp - open_today
-                pct = (chg / open_today) * 100
-                data[name] = {"ltp": ltp, "pct": pct}
-            else:
-                data[name] = {"ltp": 0, "pct": 0}
-        except:
-            data[name] = {"ltp": 0, "pct": 0}
-
-    with col1:
-        n = data["NIFTY 50"]
-        st.metric("NIFTY 50", f"{n['ltp']:,.2f}", f"{n['pct']:.2f}%")
-    with col2:
-        b = data["BANK NIFTY"]
-        st.metric("BANK NIFTY", f"{b['ltp']:,.2f}", f"{b['pct']:.2f}%")
-    with col3:
-        s = data["SENSEX"]
-        st.metric("SENSEX", f"{s['ltp']:,.2f}", f"{s['pct']:.2f}%")
+        ltp = 0.0
+        pct = 0.0
         
+        if live_data and key in live_data:
+            quote = live_data[key]
+            ltp = quote.last_price
+            # Calculate % Change from Previous Close
+            prev_close = quote.ohlc.close
+            if prev_close > 0:
+                pct = ((ltp - prev_close) / prev_close) * 100
+        
+        if name == "NIFTY 50": nifty_pct = pct
+
+        # Display Metrics
+        label = f"{name}"
+        if name == "NIFTY 50":
+            with col1: st.metric(label, f"{ltp:,.2f}", f"{pct:.2f}%")
+        elif name == "BANK NIFTY":
+            with col2: st.metric(label, f"{ltp:,.2f}", f"{pct:.2f}%")
+        elif name == "SENSEX":
+            with col3: st.metric(label, f"{ltp:,.2f}", f"{pct:.2f}%")
+
     with col4:
         bias, color = ("SIDEWAYS ↔️", "gray")
-        if data["NIFTY 50"]['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
-        elif data["NIFTY 50"]['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
+        if nifty_pct > 0.25: bias, color = ("BULLISH 🚀", "green")
+        elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         
         st.markdown(f"""
             <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
@@ -191,54 +215,102 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER ENGINE (AUTO-REFRESH: 3 MINUTES) ---
-@st.fragment(run_every=180) # <--- KEPT AT 3 MINUTES
+# --- 7. SCANNER ENGINE (HYBRID: LIVE PRICE + HISTORICAL INDICATORS) ---
+@st.fragment(run_every=180) 
 def scanner_engine():
     bullish, bearish = [], []
-    progress_bar = st.progress(0, text="Scanning Market (Updates every 3 mins)...")
-    total = len(FNO_SYMBOLS_RAW)
+    progress_bar = st.progress(0, text="Scanning Market...")
     
-    for i, raw_sym in enumerate(FNO_SYMBOLS_RAW):
-        try:
-            clean_sym = raw_sym.replace(".NS", "")
-            instrument_key = SYMBOL_MAP.get(clean_sym)
-            if not instrument_key: continue
+    # 1. PREPARE KEYS
+    valid_symbols = []
+    key_map = {} # Map key -> symbol name
+    
+    for raw_sym in FNO_SYMBOLS_RAW:
+        clean_sym = raw_sym.replace(".NS", "")
+        key = SYMBOL_MAP.get(clean_sym)
+        if key:
+            valid_symbols.append(key)
+            key_map[key] = clean_sym
             
-            df = fetch_upstox_candles(instrument_key)
+    # 2. BATCH FETCH LIVE PRICES (FAST)
+    # We fetch all LTPs in one go to ensure displayed price is FRESH
+    # Upstox allows multiple keys in one call
+    chunk_size = 400 # Upstox limit is 500
+    live_quotes_cache = {}
+    
+    for i in range(0, len(valid_symbols), chunk_size):
+        chunk = valid_symbols[i:i+chunk_size]
+        quotes = fetch_live_quotes(chunk)
+        if quotes:
+            live_quotes_cache.update(quotes)
+
+    # 3. ANALYZE EACH SYMBOL
+    total = len(valid_symbols)
+    
+    for i, key in enumerate(valid_symbols):
+        try:
+            clean_sym = key_map[key]
+            
+            # A. Get Live Data (LTP & Day Change)
+            if key not in live_quotes_cache: continue
+            
+            quote = live_quotes_cache[key]
+            ltp = quote.last_price
+            prev_close = quote.ohlc.close
+            
+            # Calculate Live % Change
+            p_change = 0.0
+            if prev_close > 0:
+                p_change = round(((ltp - prev_close) / prev_close) * 100, 2)
+                
+            # B. Get History (For RSI/ADX/OI)
+            # We still need history for indicators, even if it's 1-min delayed
+            df = fetch_upstox_history(key)
             
             if df is not None and len(df) > 30:
+                # Indicators
                 df['RSI'] = ta.rsi(df['close'], length=14)
                 adx_df = ta.adx(df['high'], df['low'], df['close'], length=14)
                 df['ADX'] = adx_df['ADX_14']
                 df['EMA_5'] = ta.ema(df['close'], length=5)
                 
-                last, prev = df.iloc[-1], df.iloc[-2]
-                ltp = last['close']
-                curr_rsi, curr_adx, ema_5 = last['RSI'], last['ADX'], last['EMA_5']
+                # Get Indicator Values (from closed candles)
+                last_candle = df.iloc[-1]
+                curr_rsi = last_candle['RSI']
+                curr_adx = last_candle['ADX']
+                ema_5 = last_candle['EMA_5'] # This might be slightly old
                 
-                curr_oi, prev_oi = last['oi'], prev['oi']
-                oi_chg = ((curr_oi - prev_oi) / prev_oi * 100) if prev_oi > 0 else 0
-                
-                day_open = df[df['timestamp'].dt.date == datetime.now().date()]['open'].min()
-                if pd.isna(day_open): day_open = df['open'].iloc[-10]
-                p_change = round(((ltp - day_open) / day_open) * 100, 2)
+                # C. Live Momentum (Live Price vs EMA)
+                # Using LIVE LTP vs EMA gives much better "Active" signals
                 mom_pct = round(((ltp - ema_5) / ema_5) * 100, 2)
                 
+                # D. OI Logic (From History)
+                curr_oi = last_candle['oi']
+                prev_oi = df.iloc[-2]['oi']
+                oi_chg = ((curr_oi - prev_oi) / prev_oi * 100) if prev_oi > 0 else 0
+                
+                # URL
                 tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{clean_sym}"
                 
                 row = {
-                    "Symbol": tv_url, "LTP": ltp, "Mom %": mom_pct,
-                    "Chg %": p_change, "OI Chg %": round(oi_chg, 2),
-                    "RSI": round(curr_rsi, 1), "ADX": round(curr_adx, 1),
+                    "Symbol": tv_url, 
+                    "LTP": ltp,           # LIVE PRICE
+                    "Mom %": mom_pct,     # LIVE MOMENTUM
+                    "Chg %": p_change,    # LIVE CHANGE
+                    "OI Chg %": round(oi_chg, 2),
+                    "RSI": round(curr_rsi, 1),
+                    "ADX": round(curr_adx, 1),
                     "Sentiment": get_sentiment(p_change, oi_chg)
                 }
                 
                 if p_change > 0.5 and curr_rsi > 60 and curr_adx > 20: bullish.append(row)
                 elif p_change < -0.5 and curr_rsi < 40 and curr_adx > 20: bearish.append(row)
             
-            time.sleep(0.02)
+            # Small sleep to prevent rate limiting on History API
+            time.sleep(0.05)
             progress_bar.progress((i + 1) / total)
-        except: continue
+            
+        except Exception: continue
 
     progress_bar.empty()
     
@@ -250,11 +322,11 @@ def scanner_engine():
     
     c1, c2 = st.columns(2)
     with c1:
-        st.success("🟢 TOP 10 BULLS")
+        st.success("🟢 TOP 10 BULLS (Live)")
         if bullish: st.dataframe(pd.DataFrame(bullish).sort_values(by="Mom %", ascending=False).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bullish signals.")
     with c2:
-        st.error("🔴 TOP 10 BEARS")
+        st.error("🔴 TOP 10 BEARS (Live)")
         if bearish: st.dataframe(pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
     
@@ -262,8 +334,6 @@ def scanner_engine():
     st.markdown(f"""
         <div style='text-align:left; color:grey; margin-top:20px;'>
             Last Updated: {ist_time}<br>
-        </div>
-        <div style='text-align:center; color:grey; margin-top:20px;'>
             <strong>Powered by : i-Tech World</strong>
         </div>
     """, unsafe_allow_html=True)
