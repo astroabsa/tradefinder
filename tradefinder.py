@@ -109,7 +109,7 @@ def fetch_futures_data(security_id, interval=60):
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
             exchange_segment="NSE_FNO", 
-            instrument_type="FUTSTK", # Default for Stocks
+            instrument_type="FUTSTK",
             from_date=from_date,
             to_date=to_date,
             interval=interval
@@ -157,7 +157,6 @@ def fetch_market_dashboard():
         except:
             data_display[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
-    # --- RENDER DASHBOARD ---
     col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
@@ -206,7 +205,6 @@ def refreshable_data_tables():
             futa_data = FNO_MAP[sym]
             sec_id = futa_data['id']
             
-            # Fetch Data (1H Candles)
             df = fetch_futures_data(sec_id, interval=60)
             
             if not df.empty and len(df) > 20:
@@ -273,7 +271,14 @@ def refreshable_data_tables():
             st.dataframe(pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=col_config)
         else: st.info("No bearish setups found.")
 
-    st.markdown(f"<div style='text-align:center; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} | Powered by: i-Tech World</div>", unsafe_allow_html=True)
+    # --- RESTORED FOOTER ---
+    ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
+    st.write(f"🕒 **Last Data Sync:** {ist_time} IST (Auto-refreshing in 3 mins)")
+    st.markdown("""
+        <div style='text-align: center; color: grey; padding-top: 20px;'>
+            Powered by : i-Tech World
+        </div>
+    """, unsafe_allow_html=True)
 
 if dhan:
     refreshable_data_tables()
