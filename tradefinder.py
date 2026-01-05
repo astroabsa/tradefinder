@@ -204,6 +204,7 @@ def market_dashboard():
                 <h3 style="margin:0; color: {color};">Bias: {bias}</h3>
             </div>
         """, unsafe_allow_html=True)
+        
 # --- 7. SCANNER ENGINE (AUTO-REFRESH: 3 MINUTES) ---
 @st.fragment(run_every=180) # <--- KEPT AT 3 MINUTES
 def scanner_engine():
