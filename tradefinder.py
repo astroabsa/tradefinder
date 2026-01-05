@@ -100,9 +100,8 @@ def fetch_live_quotes(keys_list):
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        # Using correct interval='1d' and api_version='2.0'
+        # API call with explicit interval
         response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
-        
         if response.status == 'success':
             return response.data
     except Exception as e:
@@ -148,23 +147,24 @@ def market_dashboard():
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
-    # FIX: Robust Value Extraction (Handles Dict vs Object)
+    # FIX: Robust Value Extraction (Handles Dictionary Access)
     def get_val(key):
         if live_data and key in live_data:
             q = live_data[key]
             
-            # 1. Try Dictionary Access (Likely what is returned)
+            # --- THE FIX IS HERE ---
+            # We try dictionary access ['key'] first, as your debug logs show it's a dict
             try:
-                ltp = q['last_price']
+                ltp = float(q['last_price'])
                 ohlc = q['ohlc']
-                close = ohlc['close']
-                if close == 0: close = ohlc['open']
+                close = float(ohlc['close'])
+                if close == 0: close = float(ohlc['open'])
             except:
-                # 2. Fallback to Object Access (If API changes)
+                # Fallback to Object Access (dot notation)
                 try:
-                    ltp = q.last_price
-                    close = q.ohlc.close
-                    if close == 0: close = q.ohlc.open
+                    ltp = float(q.last_price)
+                    close = float(q.ohlc.close)
+                    if close == 0: close = float(q.ohlc.open)
                 except:
                     return 0.0, 0.0
             
@@ -216,12 +216,12 @@ def scanner():
             # 1. LIVE PRICE (Priority)
             ltp = 0.0
             
-            # Updated: Dictionary Access Logic
+            # Updated: Dictionary Access Logic for Scanner too
             if key in live_quotes:
                 try:
-                    ltp = live_quotes[key]['last_price']
+                    ltp = float(live_quotes[key]['last_price'])
                 except:
-                    try: ltp = live_quotes[key].last_price
+                    try: ltp = float(live_quotes[key].last_price)
                     except: pass
             
             # 2. INDICATORS (History)
