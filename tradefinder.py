@@ -114,24 +114,34 @@ FNO_SYMBOLS_RAW = [
 ]
 
 # --- 5. CORE FUNCTIONS ---
-def fetch_upstox_candles(instrument_key):
+# B. LIVE QUOTE DATA (Debug Version)
+def fetch_live_quotes(instrument_keys_list):
+    """Fetches real-time snapshot with Error Reporting"""
+    if not instrument_keys_list:
+        return {}
+    
     try:
-        to_date = datetime.now().strftime("%Y-%m-%d")
-        from_date = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-        api_response = api_instance.get_historical_candle_data1(
-            instrument_key=instrument_key,
-            interval='30minute', to_date=to_date, from_date=from_date, api_version='2.0'
-        )
-        if api_response.status == 'success' and api_response.data.candles:
-            cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'oi']
-            df = pd.DataFrame(api_response.data.candles, columns=cols)
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
-            for col in ['open', 'high', 'low', 'close', 'volume', 'oi']:
-                df[col] = df[col].astype(float)
-            df = df.sort_values('timestamp', ascending=True).reset_index(drop=True)
-            return df
-    except: pass
-    return None
+        # Join keys with comma
+        keys_str = ",".join(instrument_keys_list)
+        
+        # Call API
+        response = quote_api.get_full_market_quote(keys_str, '2.0')
+        
+        # DEBUG: Check if response is valid
+        if hasattr(response, 'status') and response.status == 'success':
+            return response.data
+        else:
+            # If status is not success, show why
+            st.error(f"❌ API returned failure: {response}")
+            return {}
+
+    except ApiException as e:
+        # SHOW THE EXACT ERROR ON DASHBOARD
+        st.error(f"❌ Upstox API Error: {e.body}")
+        return {}
+    except Exception as e:
+        st.error(f"❌ Python Error: {e}")
+        return {}
 
 def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg > 0: return "Long Buildup 🚀"
