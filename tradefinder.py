@@ -115,6 +115,7 @@ FNO_SYMBOLS_RAW = [
 
 # --- 5. CORE FUNCTIONS ---
 # B. LIVE QUOTE DATA (Debug Version)
+# B. LIVE QUOTE DATA (Debug Version)
 def fetch_live_quotes(instrument_keys_list):
     """Fetches real-time snapshot with Error Reporting"""
     if not instrument_keys_list:
@@ -150,57 +151,59 @@ def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
     return "Neutral"
 
-# --- 6. DASHBOARD COMPONENT (AUTO-REFRESH: 5 SECONDS) ---
-@st.fragment(run_every=5)  # <--- CHANGED THIS
+# --- 6. DASHBOARD COMPONENT (REAL-TIME) ---
+@st.fragment(run_every=5) 
 def market_dashboard():
+    # Use these keys - they are safer (verify them in Upstox dev portal if needed)
     indices = {
-        "NIFTY 50": "NSE_FO|NIFTY26JANFUT",  # Example Future Key
-        "BANK NIFTY": "NSE_FO|BANKNIFTY26JANFUT",
+        "NIFTY 50": "NSE_INDEX|Nifty 50",  # Ensure exact casing
+        "BANK NIFTY": "NSE_INDEX|Nifty Bank",
         "SENSEX": "BSE_INDEX|SENSEX"
     }
     
+    # FETCH REAL-TIME QUOTES
+    live_data = fetch_live_quotes(list(indices.values()))
+    
     col1, col2, col3, col4 = st.columns([1, 1, 1, 1.5])
-    data = {}
-
+    
+    nifty_pct = 0
+    
     for name, key in indices.items():
-        try:
-            df = fetch_upstox_candles(key)
-            if df is not None and not df.empty:
-                ltp = df['close'].iloc[-1]
-                open_today = df[df['timestamp'].dt.date == datetime.now().date()]['open'].min()
-                if pd.isna(open_today): open_today = df['open'].iloc[-10]
-                chg = ltp - open_today
-                pct = (chg / open_today) * 100
-                data[name] = {"ltp": ltp, "pct": pct}
-            else:
-                data[name] = {"ltp": 0, "pct": 0}
-        except:
-            data[name] = {"ltp": 0, "pct": 0}
-
-    with col1:
-        n = data["NIFTY 50"]
-        st.metric("NIFTY 50", f"{n['ltp']:,.2f}", f"{n['pct']:.2f}%")
-    with col2:
-        b = data["BANK NIFTY"]
-        st.metric("BANK NIFTY", f"{b['ltp']:,.2f}", f"{b['pct']:.2f}%")
-    with col3:
-        s = data["SENSEX"]
-        st.metric("SENSEX", f"{s['ltp']:,.2f}", f"{s['pct']:.2f}%")
+        ltp = 0.0
+        pct = 0.0
         
+        # Check if data exists for this specific key
+        if live_data and key in live_data:
+            quote = live_data[key]
+            ltp = quote.last_price
+            prev_close = quote.ohlc.close
+            if prev_close > 0:
+                pct = ((ltp - prev_close) / prev_close) * 100
+        else:
+            # If 0.00, it means the key was rejected or data is missing
+            pass 
+        
+        if name == "NIFTY 50": nifty_pct = pct
+
+        # Display Metrics
+        label = f"{name}"
+        if name == "NIFTY 50":
+            with col1: st.metric(label, f"{ltp:,.2f}", f"{pct:.2f}%")
+        elif name == "BANK NIFTY":
+            with col2: st.metric(label, f"{ltp:,.2f}", f"{pct:.2f}%")
+        elif name == "SENSEX":
+            with col3: st.metric(label, f"{ltp:,.2f}", f"{pct:.2f}%")
+
     with col4:
         bias, color = ("SIDEWAYS ↔️", "gray")
-        if data["NIFTY 50"]['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
-        elif data["NIFTY 50"]['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
+        if nifty_pct > 0.25: bias, color = ("BULLISH 🚀", "green")
+        elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         
         st.markdown(f"""
             <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
                 <h3 style="margin:0; color: {color};">Bias: {bias}</h3>
             </div>
         """, unsafe_allow_html=True)
-
-market_dashboard()
-st.markdown("---")
-
 # --- 7. SCANNER ENGINE (AUTO-REFRESH: 3 MINUTES) ---
 @st.fragment(run_every=180) # <--- KEPT AT 3 MINUTES
 def scanner_engine():
