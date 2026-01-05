@@ -139,19 +139,33 @@ def fetch_upstox_history(instrument_key):
     return None
 
 # B. LIVE QUOTE DATA (For Price & % Change) - No Lag
+# B. LIVE QUOTE DATA (Debug Version)
 def fetch_live_quotes(instrument_keys_list):
-    """Fetches real-time snapshot of LTP and OHLC for a list of keys"""
+    """Fetches real-time snapshot with Error Reporting"""
+    if not instrument_keys_list:
+        return {}
+    
     try:
-        # Join keys with comma (Upstox accepts up to 500 keys)
+        # Join keys with comma
         keys_str = ",".join(instrument_keys_list)
+        
+        # Call API
         response = quote_api.get_full_market_quote(keys_str, '2.0')
         
-        if response.status == 'success':
-            return response.data # Returns a dictionary keyed by instrument_key
+        # DEBUG: Check if response is valid
+        if hasattr(response, 'status') and response.status == 'success':
+            return response.data
+        else:
+            st.error(f"❌ API returned failure: {response}")
+            return {}
+
+    except ApiException as e:
+        # SHOW THE EXACT ERROR ON DASHBOARD
+        st.error(f"❌ Upstox API Error: {e.body}")
+        return {}
     except Exception as e:
-        # print(f"Quote Error: {e}") 
-        pass
-    return {}
+        st.error(f"❌ Python Error: {e}")
+        return {}
 
 def get_sentiment(p_chg, oi_chg):
     if p_chg > 0 and oi_chg > 0: return "Long Buildup 🚀"
