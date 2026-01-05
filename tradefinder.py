@@ -108,8 +108,9 @@ def fetch_live_batch(keys_list, mode='FULL'):
 def fetch_history(key):
     try:
         to_d = datetime.now().strftime("%Y-%m-%d")
-        from_d = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         
+        # 15-Minute Candles
         res = history_api.get_historical_candle_data1(
             instrument_key=key, interval='15minute', 
             to_date=to_d, from_date=from_d, api_version='2.0'
@@ -119,7 +120,8 @@ def fetch_history(key):
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             for c in ['open','high','low','close','vol','oi']: df[c] = df[c].astype(float)
             return df.sort_values('timestamp').reset_index(drop=True)
-    except: pass
+    except Exception as e:
+        if SHOW_DEBUG: st.write(f"History Error ({key}): {e}")
     return None
 
 def extract_price_robust(response_data, target_key):
@@ -199,20 +201,23 @@ def scanner():
             st.write(live_quotes)
     
     for i, (name, key) in enumerate(STOCKS.items()):
-        try:
-            # 1. LIVE PRICE
-            ltp, _ = extract_price_robust(live_quotes, key)
-            
-            # 2. HISTORY
-            df = fetch_history(key)
-            if df is None or len(df) < 20: continue
-            
-            # Fallback
-            is_live = True
-            if ltp == 0: 
-                ltp = df.iloc[-1]['close']
-                is_live = False
-            
+        
+        # 1. LIVE PRICE (Robust)
+        ltp, _ = extract_price_robust(live_quotes, key)
+        
+        # Default Values (Used if History Fails)
+        curr_rsi = 0.0
+        curr_adx = 0.0
+        mom_pct = 0.0
+        oi_change_pct = 0.0
+        nature = "Waiting..."
+        is_live = True
+
+        # 2. HISTORY FETCH (With Rate Limit Protection)
+        time.sleep(0.2) # FIX: Prevents API Blocking
+        df = fetch_history(key)
+        
+        if df is not None and len(df) > 20:
             # 3. TECHNICALS
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
@@ -221,6 +226,11 @@ def scanner():
             last = df.iloc[-1]
             prev = df.iloc[-2]
             
+            # If Live LTP is 0, use History
+            if ltp == 0: 
+                ltp = last['close']
+                is_live = False
+            
             curr_rsi = round(last['RSI'], 2)
             curr_adx = round(last['ADX'], 2)
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
@@ -228,36 +238,32 @@ def scanner():
             # 4. OI Analysis
             curr_oi = last['oi']
             prev_oi = prev['oi']
-            oi_change_pct = 0.0
             if prev_oi > 0:
                 oi_change_pct = ((curr_oi - prev_oi) / prev_oi) * 100
             
             price_change_candle = ((last['close'] - prev['close']) / prev['close']) * 100
             nature = get_oi_analysis(price_change_candle, oi_change_pct)
 
-            display_price = f"₹{ltp:,.2f}"
-            if not is_live: display_price += " (Delayed)"
+        # 5. PREPARE ROW (Always Add, Never Skip)
+        display_price = f"₹{ltp:,.2f}"
+        if not is_live: display_price += " (Old)"
 
-            row = {
-                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{name}",
-                "LTP": display_price, 
-                "Mom %": mom_pct,
-                "RSI": curr_rsi, 
-                "ADX": curr_adx,
-                "OI Chg %": round(oi_change_pct, 2),
-                "Nature": nature 
-            }
-            
-            # COLLECT EVERYTHING (Don't filter yet!)
-            all_stocks.append(row)
-            
-            bar.progress((i+1)/len(valid_keys))
-        except: pass
+        row = {
+            "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{name}",
+            "LTP": display_price, 
+            "Mom %": mom_pct,
+            "RSI": curr_rsi, 
+            "ADX": curr_adx,
+            "OI Chg %": round(oi_change_pct, 2),
+            "Nature": nature 
+        }
+        all_stocks.append(row)
+        
+        bar.progress((i+1)/len(valid_keys))
     
     bar.empty()
     
-    # --- DISPLAY LOGIC ---
-    # Convert to DF
+    # --- DISPLAY ---
     if all_stocks:
         df_all = pd.DataFrame(all_stocks)
         
@@ -267,21 +273,19 @@ def scanner():
             "OI Chg %": st.column_config.NumberColumn("OI Chg %", format="%.2f%%")
         }
 
-        # 1. BULLS TABLE (Sort by Momentum Descending)
         st.subheader("🟢 Market Watch: Strongest Stocks")
         st.dataframe(
             df_all.sort_values("Mom %", ascending=False).head(10), 
             use_container_width=True, hide_index=True, column_config=col_conf
         )
 
-        # 2. BEARS TABLE (Sort by Momentum Ascending - Weakest First)
         st.subheader("🔴 Market Watch: Weakest Stocks")
         st.dataframe(
             df_all.sort_values("Mom %", ascending=True).head(10), 
             use_container_width=True, hide_index=True, column_config=col_conf
         )
     else:
-        st.warning("No data processed. Check if History API is working.")
+        st.error("Critical Error: No data could be processed.")
         
     st.markdown(f"<div style='text-align:left; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}<br><strong>Powered by : i-Tech World</strong></div>", unsafe_allow_html=True)
 
