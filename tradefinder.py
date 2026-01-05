@@ -88,10 +88,6 @@ STOCKS = {
 # --- 5. FUNCTIONS ---
 
 def fetch_live_batch(keys_list, mode='FULL'):
-    """
-    Fetches data in batches.
-    Switched mode='FULL' to use get_full_market_quote (safest option).
-    """
     if not keys_list: return {}
     
     combined_data = {}
@@ -103,10 +99,8 @@ def fetch_live_batch(keys_list, mode='FULL'):
         
         try:
             if mode == 'FULL':
-                # FIX: Using standard full_market_quote which definitely exists
                 response = quote_api.get_full_market_quote(symbol=keys_str, api_version='2.0')
             else:
-                # OHLC for Indices
                 response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
                 
             if response.status == 'success':
@@ -134,25 +128,33 @@ def fetch_history(key):
     return None
 
 def extract_price_robust(response_data, target_key):
-    """Robust extraction for LTP"""
+    """
+    ULTRA-ROBUST EXTRACTION [The Fix]
+    Looks inside the data packet for the 'instrument_token' field.
+    """
     ltp, ref_price = 0.0, 0.0
     if not response_data: return 0.0, 0.0
 
-    # 1. Fuzzy Match
-    data_item = None
-    if target_key in response_data:
-        data_item = response_data[target_key]
-    else:
-        target_part = target_key.split("|")[-1]
+    # 1. Direct Match
+    data_item = response_data.get(target_key)
+
+    # 2. Deep Search (If direct key fails)
+    if not data_item:
         for k, v in response_data.items():
-            if target_part in str(k):
-                data_item = v; break
-    
+            # Check if the data packet contains our target ISIN
+            if isinstance(v, dict) and v.get('instrument_token') == target_key:
+                data_item = v
+                break
+            # Handle object case
+            elif hasattr(v, 'instrument_token') and v.instrument_token == target_key:
+                data_item = v
+                break
+
     if not data_item: return 0.0, 0.0
 
-    # 2. Extract
+    # 3. Extract Values
     try:
-        # Dictionary Access
+        # Dict Access
         if isinstance(data_item, dict):
             ltp = float(data_item.get('last_price', 0))
             ohlc = data_item.get('ohlc', {})
@@ -168,7 +170,6 @@ def extract_price_robust(response_data, target_key):
 # --- 6. DASHBOARD (Indices) ---
 @st.fragment(run_every=2)
 def market_dashboard():
-    # Use OHLC for indices (We need Open price for %)
     live_data = fetch_live_batch(list(INDICES.values()), mode='OHLC')
     
     if SHOW_DEBUG:
@@ -207,7 +208,6 @@ def scanner():
     valid_keys = list(STOCKS.values())
     
     # 1. BATCH FETCH (FULL MODE)
-    # Reverted to FULL mode since LTP mode is missing in your SDK
     live_quotes = fetch_live_batch(valid_keys, mode='FULL')
     
     if SHOW_DEBUG:
@@ -217,10 +217,10 @@ def scanner():
     
     for i, (name, key) in enumerate(STOCKS.items()):
         try:
-            # 2. LIVE PRICE
+            # 2. LIVE PRICE (Using Deep Search)
             ltp, _ = extract_price_robust(live_quotes, key)
             
-            # 3. HISTORY (Indicators)
+            # 3. HISTORY
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
@@ -238,7 +238,6 @@ def scanner():
             last = df.iloc[-1]
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
-            # Display Logic
             display_price = f"₹{ltp:,.2f}"
             if not is_live: display_price += " (Delayed)"
 
