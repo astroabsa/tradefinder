@@ -95,12 +95,12 @@ FNO_SYMBOLS = [
 # --- 5. FUNCTIONS ---
 def fetch_live_quotes(keys_list):
     """
-    Fetches LIGHTWEIGHT OHLC Quote (Keyword Arguments Fixed)
+    Fetches LIGHTWEIGHT OHLC Quote
     """
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        # FIX: Added 'interval="1d"' which was missing in your error
+        # Using correct interval='1d' and api_version='2.0'
         response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
         
         if response.status == 'success':
@@ -113,7 +113,6 @@ def fetch_history(key):
     try:
         to_d = datetime.now().strftime("%Y-%m-%d")
         from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-        # Explicit arguments here too just in case
         res = history_api.get_historical_candle_data1(
             instrument_key=key, interval='30minute', 
             to_date=to_d, from_date=from_d, api_version='2.0'
@@ -149,18 +148,30 @@ def market_dashboard():
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
+    # FIX: Robust Value Extraction (Handles Dict vs Object)
     def get_val(key):
         if live_data and key in live_data:
             q = live_data[key]
-            # OHLC Endpoint structure: { ohlc: { close: ..., open: ... }, last_price: ... }
-            ltp = q.last_price
-            close = q.ohlc.close
-            # If OHLC close is 0 (sometimes happens), use Open
-            if close == 0: close = q.ohlc.open 
+            
+            # 1. Try Dictionary Access (Likely what is returned)
+            try:
+                ltp = q['last_price']
+                ohlc = q['ohlc']
+                close = ohlc['close']
+                if close == 0: close = ohlc['open']
+            except:
+                # 2. Fallback to Object Access (If API changes)
+                try:
+                    ltp = q.last_price
+                    close = q.ohlc.close
+                    if close == 0: close = q.ohlc.open
+                except:
+                    return 0.0, 0.0
             
             if close > 0:
                 pct = ((ltp - close)/close)*100
                 return ltp, pct
+                
         return 0.0, 0.0
 
     n_ltp, n_pct = get_val(indices["NIFTY 50"])
@@ -204,8 +215,14 @@ def scanner():
         try:
             # 1. LIVE PRICE (Priority)
             ltp = 0.0
+            
+            # Updated: Dictionary Access Logic
             if key in live_quotes:
-                ltp = live_quotes[key].last_price
+                try:
+                    ltp = live_quotes[key]['last_price']
+                except:
+                    try: ltp = live_quotes[key].last_price
+                    except: pass
             
             # 2. INDICATORS (History)
             df = fetch_history(key)
