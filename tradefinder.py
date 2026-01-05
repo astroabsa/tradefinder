@@ -11,7 +11,43 @@ import io
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
 
-# --- 2. DHAN API CREDENTIALS (FROM SECRETS) ---
+# --- 2. AUTHENTICATION SYSTEM ---
+AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
+
+def authenticate_user(user_in, pw_in):
+    try:
+        df = pd.read_csv(AUTH_CSV_URL)
+        df['username'] = df['username'].astype(str).str.strip().str.lower()
+        df['password'] = df['password'].astype(str).str.strip()
+        match = df[(df['username'] == str(user_in).strip().lower()) & (df['password'] == str(pw_in).strip())]
+        return not match.empty
+    except Exception as e:
+        st.error(f"Login Error: {e}")
+        return False
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    st.title("🔐 Absa's F&O Pro Login")
+    with st.form("login_form"):
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
+        if st.form_submit_button("Log In"):
+            if authenticate_user(u, p):
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("Invalid Credentials")
+    st.stop()
+
+# --- 3. MAIN APP START ---
+st.title("🚀 Absa's Live F&O Screener Pro")
+if st.sidebar.button("Log out"):
+    st.session_state["authenticated"] = False
+    st.rerun()
+
+# --- 4. DHAN API CONNECTION ---
 dhan = None
 try:
     client_id = st.secrets["DHAN_CLIENT_ID"]
@@ -21,7 +57,7 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 3. SMART F&O MASTER LIST ---
+# --- 5. SMART F&O MASTER LIST ---
 @st.cache_data(ttl=3600*4)
 def get_fno_futures_map():
     fno_map = {}
@@ -33,7 +69,6 @@ def get_fno_futures_map():
         
         # 1. Stocks Futures
         stk_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTSTK')]
-        
         # 2. Index Futures (For Dashboard)
         idx_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTIDX')]
         
@@ -51,10 +86,9 @@ def get_fno_futures_map():
             base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
             fno_map[base_sym] = {'id': str(row['SEM_SMST_SECURITY_ID']), 'name': row['SEM_CUSTOM_SYMBOL']}
             
-        # Process Indices (NIFTY/BANKNIFTY)
+        # Process Indices
         curr_idx = get_current_futures(idx_df)
         for _, row in curr_idx.iterrows():
-            # Index symbols are often 'NIFTY-JAN...' or 'BANKNIFTY-JAN...'
             base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
             index_map[base_sym] = str(row['SEM_SMST_SECURITY_ID'])
             
@@ -66,17 +100,11 @@ def get_fno_futures_map():
 with st.spinner("Syncing F&O List..."):
     FNO_MAP, INDEX_MAP = get_fno_futures_map()
 
-# --- 4. DATA FETCHING ---
+# --- 6. DATA FETCHING ---
 def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-        
-        # Determine Instrument Type based on ID (Simple heuristic or pass as arg)
-        # For simplicity, we use the Master List context, but here we assume FUTSTK/FUTIDX logic
-        # For Dashboard (Indices), we need 'FUTIDX'. For Stocks, 'FUTSTK'.
-        # Dhan API requires correct type. We will try FUTSTK first (majority), 
-        # but for dashboard specific function we use FUTIDX.
         
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
@@ -96,10 +124,8 @@ def fetch_futures_data(security_id, interval=60):
     except: pass
     return pd.DataFrame()
 
-# --- 5. DASHBOARD FUNCTION (Matches Original Layout) ---
+# --- 7. DASHBOARD LOGIC ---
 def fetch_market_dashboard():
-    # Map for Display Name -> Dhan Symbol Key (from INDEX_MAP)
-    # Ensure keys match what is in INDEX_MAP (e.g., 'NIFTY', 'BANKNIFTY')
     indices = {
         "NIFTY 50": INDEX_MAP.get("NIFTY", ""), 
         "BANK NIFTY": INDEX_MAP.get("BANKNIFTY", "")
@@ -107,24 +133,21 @@ def fetch_market_dashboard():
     
     data_display = {}
     
-    # Fetch Data for Indices
     for name, sec_id in indices.items():
         if not sec_id: continue
         try:
             to_date = datetime.now().strftime('%Y-%m-%d')
-            # Fetch Index Futures Data (FUTIDX)
             res = dhan.intraday_minute_data(
                 security_id=sec_id,
                 exchange_segment="NSE_FNO",
                 instrument_type="FUTIDX",
-                from_date=to_date, # Only today for speed
+                from_date=to_date, 
                 to_date=to_date,
-                interval=1 # 1 Minute for latest price
+                interval=1 
             )
             
             if res['status'] == 'success' and res['data'].get('close'):
                 ltp = res['data']['close'][-1]
-                # Calculate Change from Day Open
                 open_price = res['data']['open'][0]
                 chg = ltp - open_price
                 pct = (chg / open_price) * 100
@@ -134,39 +157,23 @@ def fetch_market_dashboard():
         except:
             data_display[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
-    # --- RENDER DASHBOARD (Exact Original Layout) ---
+    # --- RENDER DASHBOARD ---
     col1, col2, col3 = st.columns([1, 1, 2])
     
-    # Nifty Metric
     with col1:
         n = data_display.get("NIFTY 50", {"ltp":0, "chg":0, "pct":0})
-        st.metric(
-            label="NIFTY 50 (Fut)", 
-            value=f"{n['ltp']:,.2f}", 
-            delta=f"{n['chg']:.2f} ({n['pct']:.2f}%)"
-        )
+        st.metric(label="NIFTY 50 (Fut)", value=f"{n['ltp']:,.2f}", delta=f"{n['chg']:.2f} ({n['pct']:.2f}%)")
     
-    # Bank Nifty Metric
     with col2:
         b = data_display.get("BANK NIFTY", {"ltp":0, "chg":0, "pct":0})
-        st.metric(
-            label="BANK NIFTY (Fut)", 
-            value=f"{b['ltp']:,.2f}", 
-            delta=f"{b['chg']:.2f} ({b['pct']:.2f}%)"
-        )
+        st.metric(label="BANK NIFTY (Fut)", value=f"{b['ltp']:,.2f}", delta=f"{b['chg']:.2f} ({b['pct']:.2f}%)")
         
-    # Sentiment Box
     with col3:
         n_pct = data_display.get("NIFTY 50", {}).get("pct", 0)
         bias = "SIDEWAYS ↔️"
         color = "gray"
-        
-        if n_pct > 0.25: 
-            bias = "BULLISH 🚀"
-            color = "green"
-        elif n_pct < -0.25: 
-            bias = "BEARISH 📉"
-            color = "red"
+        if n_pct > 0.25: bias = "BULLISH 🚀"; color = "green"
+        elif n_pct < -0.25: bias = "BEARISH 📉"; color = "red"
             
         st.markdown(f"""
             <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
@@ -174,7 +181,7 @@ def fetch_market_dashboard():
             </div>
         """, unsafe_allow_html=True)
 
-# --- 6. OI LOGIC ---
+# --- 8. OI LOGIC ---
 def get_oi_analysis(price_chg, oi_chg):
     if price_chg > 0 and oi_chg > 0: return "Long Buildup 🟢"
     if price_chg < 0 and oi_chg > 0: return "Short Buildup 🔴"
@@ -182,10 +189,9 @@ def get_oi_analysis(price_chg, oi_chg):
     if price_chg > 0 and oi_chg < 0: return "Short Covering 🚀"
     return "Neutral ⚪"
 
-# --- 7. MAIN SCANNER ---
+# --- 9. MAIN SCANNER LOOP ---
 @st.fragment(run_every=180)
 def refreshable_data_tables():
-    # 1. Render Dashboard
     fetch_market_dashboard()
     st.markdown("---")
     
@@ -236,7 +242,6 @@ def refreshable_data_tables():
                     "Analysis": sentiment
                 }
                 
-                # Filters
                 if price_chg > 0.5 and curr_rsi > 60 and curr_adx > 20:
                     bullish_list.append(row)
                 elif price_chg < -0.5 and curr_rsi < 45 and curr_adx > 20:
@@ -248,7 +253,6 @@ def refreshable_data_tables():
         
     progress_bar.empty()
     
-    # --- DISPLAY TABLES ---
     col_config = {
         "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
         "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
@@ -260,19 +264,13 @@ def refreshable_data_tables():
     with c1:
         st.success(f"🟢 ACTIVE BULLS ({len(bullish_list)})")
         if bullish_list:
-            st.dataframe(
-                pd.DataFrame(bullish_list).sort_values(by="Mom %", ascending=False).head(15),
-                use_container_width=True, hide_index=True, column_config=col_config
-            )
+            st.dataframe(pd.DataFrame(bullish_list).sort_values(by="Mom %", ascending=False).head(15), use_container_width=True, hide_index=True, column_config=col_config)
         else: st.info("No bullish setups found.")
             
     with c2:
         st.error(f"🔴 ACTIVE BEARS ({len(bearish_list)})")
         if bearish_list:
-            st.dataframe(
-                pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15),
-                use_container_width=True, hide_index=True, column_config=col_config
-            )
+            st.dataframe(pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=col_config)
         else: st.info("No bearish setups found.")
 
     st.markdown(f"<div style='text-align:center; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} | Powered by: i-Tech World</div>", unsafe_allow_html=True)
