@@ -21,243 +21,261 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 3. SMART F&O MASTER LIST (Dynamic Filtering) ---
-@st.cache_data(ttl=3600*4) # Cache for 4 hours
+# --- 3. SMART F&O MASTER LIST ---
+@st.cache_data(ttl=3600*4)
 def get_fno_futures_map():
-    """
-    Downloads Dhan Master List and filters for CURRENT MONTH STOCK FUTURES only.
-    This ensures we ONLY scan valid F&O scripts.
-    """
     fno_map = {}
+    index_map = {}
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         s = requests.get(url).content
         df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         
-        # 1. Filter for NSE Stock Futures (FUTSTK)
-        # We exclude Indices (FUTIDX) to focus on Stocks as per request
-        df = df[
-            (df['SEM_EXM_EXCH_ID'] == 'NSE') & 
-            (df['SEM_INSTRUMENT_NAME'] == 'FUTSTK')
-        ]
+        # 1. Stocks Futures
+        stk_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTSTK')]
         
-        # 2. Find Nearest Expiry
-        # Convert expiry to datetime objects
-        df['SEM_EXPIRY_DATE'] = pd.to_datetime(df['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
-        today = pd.Timestamp.now().normalize()
+        # 2. Index Futures (For Dashboard)
+        idx_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTIDX')]
         
-        # Keep only future expiries
-        df = df[df['SEM_EXPIRY_DATE'] >= today]
-        
-        # Sort by Symbol and Date, then pick the first one (Nearest Month)
-        df = df.sort_values(by=['SEM_TRADING_SYMBOL', 'SEM_EXPIRY_DATE'])
-        current_futures = df.drop_duplicates(subset=['SEM_TRADING_SYMBOL'], keep='first')
-        
-        # 3. Create Map: { 'RELIANCE': 'Security_ID' }
-        # We strip the "-JAN-202X" part to get the base symbol key if needed, 
-        # but Dhan's TRADING_SYMBOL for futures is usually like 'RELIANCE-JAN2026-FUT'
-        # We need a clean key for display.
-        for _, row in current_futures.iterrows():
-            # Extract base symbol (e.g., 'RELIANCE' from 'RELIANCE-JAN-2025-FUT')
-            # The format in CSV is usually 'SYMBOL-EXPIRY'. Let's use the Custom Symbol or parse Trading Symbol.
-            # Robust way: Use the first part of the trading symbol string.
+        # Helper to find nearest expiry
+        def get_current_futures(dataframe):
+            dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+            today = pd.Timestamp.now().normalize()
+            valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
+            valid = valid.sort_values(by=['SEM_TRADING_SYMBOL', 'SEM_EXPIRY_DATE'])
+            return valid.drop_duplicates(subset=['SEM_TRADING_SYMBOL'], keep='first')
+
+        # Process Stocks
+        curr_stk = get_current_futures(stk_df)
+        for _, row in curr_stk.iterrows():
             base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
-            fno_map[base_sym] = {
-                'id': str(row['SEM_SMST_SECURITY_ID']),
-                'name': row['SEM_CUSTOM_SYMBOL']
-            }
+            fno_map[base_sym] = {'id': str(row['SEM_SMST_SECURITY_ID']), 'name': row['SEM_CUSTOM_SYMBOL']}
+            
+        # Process Indices (NIFTY/BANKNIFTY)
+        curr_idx = get_current_futures(idx_df)
+        for _, row in curr_idx.iterrows():
+            # Index symbols are often 'NIFTY-JAN...' or 'BANKNIFTY-JAN...'
+            base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
+            index_map[base_sym] = str(row['SEM_SMST_SECURITY_ID'])
             
     except Exception as e:
         st.error(f"Master List Error: {e}")
     
-    return fno_map
+    return fno_map, index_map
 
-# Load Map
-with st.spinner("Syncing F&O List & Expiries..."):
-    FNO_MAP = get_fno_futures_map()
-    
-# --- 4. OI ANALYSIS LOGIC ---
-def get_oi_analysis(price_chg, oi_chg):
-    """
-    Classifies the move based on Price vs OI correlation.
-    """
-    if price_chg > 0 and oi_chg > 0:
-        return "Long Buildup 🟢" # Strong Bullish
-    elif price_chg < 0 and oi_chg > 0:
-        return "Short Buildup 🔴" # Strong Bearish
-    elif price_chg < 0 and oi_chg < 0:
-        return "Long Unwinding ⚠️" # Weak Bullish -> Bearish
-    elif price_chg > 0 and oi_chg < 0:
-        return "Short Covering 🚀" # Explosive Bullish
-    return "Neutral ⚪"
+with st.spinner("Syncing F&O List..."):
+    FNO_MAP, INDEX_MAP = get_fno_futures_map()
 
-# --- 5. DATA FETCHING ---
-def fetch_futures_data(security_id):
-    """Fetches intraday data for the Futures Contract (Includes Volume & OI)"""
+# --- 4. DATA FETCHING ---
+def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         
-        # Fetch 60-minute candles for the FUTURE contract to match your original timeframe
+        # Determine Instrument Type based on ID (Simple heuristic or pass as arg)
+        # For simplicity, we use the Master List context, but here we assume FUTSTK/FUTIDX logic
+        # For Dashboard (Indices), we need 'FUTIDX'. For Stocks, 'FUTSTK'.
+        # Dhan API requires correct type. We will try FUTSTK first (majority), 
+        # but for dashboard specific function we use FUTIDX.
+        
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
-            exchange_segment="NSE_FNO",  # Critical: Use FNO segment for Futures
-            instrument_type="FUTSTK",
+            exchange_segment="NSE_FNO", 
+            instrument_type="FUTSTK", # Default for Stocks
             from_date=from_date,
             to_date=to_date,
-            interval=60  # 1 Hour Interval
+            interval=interval
         )
         
         if res['status'] == 'success':
             data = res['data']
             if not data: return pd.DataFrame()
-            
             df = pd.DataFrame(data)
-            df.rename(columns={
-                'start_Time': 'datetime', 
-                'open': 'Open', 
-                'high': 'High', 
-                'low': 'Low', 
-                'close': 'Close',
-                'volume': 'Volume',
-                'oi': 'OI' # Capture Open Interest
-            }, inplace=True)
+            df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
             return df
-            
-    except Exception: pass
+    except: pass
     return pd.DataFrame()
 
-# --- 6. MAIN SCANNER ---
+# --- 5. DASHBOARD FUNCTION (Matches Original Layout) ---
+def fetch_market_dashboard():
+    # Map for Display Name -> Dhan Symbol Key (from INDEX_MAP)
+    # Ensure keys match what is in INDEX_MAP (e.g., 'NIFTY', 'BANKNIFTY')
+    indices = {
+        "NIFTY 50": INDEX_MAP.get("NIFTY", ""), 
+        "BANK NIFTY": INDEX_MAP.get("BANKNIFTY", "")
+    }
+    
+    data_display = {}
+    
+    # Fetch Data for Indices
+    for name, sec_id in indices.items():
+        if not sec_id: continue
+        try:
+            to_date = datetime.now().strftime('%Y-%m-%d')
+            # Fetch Index Futures Data (FUTIDX)
+            res = dhan.intraday_minute_data(
+                security_id=sec_id,
+                exchange_segment="NSE_FNO",
+                instrument_type="FUTIDX",
+                from_date=to_date, # Only today for speed
+                to_date=to_date,
+                interval=1 # 1 Minute for latest price
+            )
+            
+            if res['status'] == 'success' and res['data'].get('close'):
+                ltp = res['data']['close'][-1]
+                # Calculate Change from Day Open
+                open_price = res['data']['open'][0]
+                chg = ltp - open_price
+                pct = (chg / open_price) * 100
+                data_display[name] = {"ltp": ltp, "chg": chg, "pct": pct}
+            else:
+                data_display[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+        except:
+            data_display[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+
+    # --- RENDER DASHBOARD (Exact Original Layout) ---
+    col1, col2, col3 = st.columns([1, 1, 2])
+    
+    # Nifty Metric
+    with col1:
+        n = data_display.get("NIFTY 50", {"ltp":0, "chg":0, "pct":0})
+        st.metric(
+            label="NIFTY 50 (Fut)", 
+            value=f"{n['ltp']:,.2f}", 
+            delta=f"{n['chg']:.2f} ({n['pct']:.2f}%)"
+        )
+    
+    # Bank Nifty Metric
+    with col2:
+        b = data_display.get("BANK NIFTY", {"ltp":0, "chg":0, "pct":0})
+        st.metric(
+            label="BANK NIFTY (Fut)", 
+            value=f"{b['ltp']:,.2f}", 
+            delta=f"{b['chg']:.2f} ({b['pct']:.2f}%)"
+        )
+        
+    # Sentiment Box
+    with col3:
+        n_pct = data_display.get("NIFTY 50", {}).get("pct", 0)
+        bias = "SIDEWAYS ↔️"
+        color = "gray"
+        
+        if n_pct > 0.25: 
+            bias = "BULLISH 🚀"
+            color = "green"
+        elif n_pct < -0.25: 
+            bias = "BEARISH 📉"
+            color = "red"
+            
+        st.markdown(f"""
+            <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
+                <h3 style="margin:0; color: {color};">Market Bias: {bias}</h3>
+            </div>
+        """, unsafe_allow_html=True)
+
+# --- 6. OI LOGIC ---
+def get_oi_analysis(price_chg, oi_chg):
+    if price_chg > 0 and oi_chg > 0: return "Long Buildup 🟢"
+    if price_chg < 0 and oi_chg > 0: return "Short Buildup 🔴"
+    if price_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
+    if price_chg > 0 and oi_chg < 0: return "Short Covering 🚀"
+    return "Neutral ⚪"
+
+# --- 7. MAIN SCANNER ---
 @st.fragment(run_every=180)
 def refreshable_data_tables():
-    # 1. MARKET DASHBOARD
-    # We can fetch Nifty Future for dashboard or keep Spot. Keeping Spot for simplicity.
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1: st.metric("NIFTY 50", "Live", "Dashboard") # Placeholder or implement fetch
-    
+    # 1. Render Dashboard
+    fetch_market_dashboard()
     st.markdown("---")
-    st.subheader("📊 F&O Momentum Scanner (Technicals + OI)")
     
     bullish_list = []
     bearish_list = []
     
-    # We loop through the keys of our dynamic F&O Map
-    # Limit to top 50-100 liquid stocks if the full list is too slow, 
-    # or scan all. For demo, we use the map directly.
     target_symbols = list(FNO_MAP.keys()) 
-    
-    progress_bar = st.progress(0, f"Scanning {len(target_symbols)} F&O Futures...")
+    progress_bar = st.progress(0, f"Scanning {len(target_symbols)} Futures...")
     
     for i, sym in enumerate(target_symbols):
         try:
             futa_data = FNO_MAP[sym]
             sec_id = futa_data['id']
-            contract_name = futa_data['name']
             
-            # 1. Fetch Futures Data
-            df = fetch_futures_data(sec_id)
+            # Fetch Data (1H Candles)
+            df = fetch_futures_data(sec_id, interval=60)
             
             if not df.empty and len(df) > 20:
-                # 2. Calculate Technicals
+                # Technicals
                 df['RSI'] = ta.rsi(df['Close'], length=14)
                 adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
                 df['EMA_5'] = ta.ema(df['Close'], length=5)
                 
-                # Get Latest Candle
                 curr = df.iloc[-1]
                 prev = df.iloc[-2]
                 
                 ltp = curr['Close']
-                ema_5 = df['EMA_5'].iloc[-1]
                 curr_rsi = curr['RSI']
                 curr_adx = adx_df['ADX_14'].iloc[-1]
-                
-                # Momentum & Change
-                momentum_pct = round(((ltp - ema_5) / ema_5) * 100, 2)
-                
-                # Price Change % (Close vs Prev Close of timeframe)
+                mom_pct = round(((ltp - df['EMA_5'].iloc[-1]) / df['EMA_5'].iloc[-1]) * 100, 2)
                 price_chg = round(((ltp - prev['Close']) / prev['Close']) * 100, 2)
                 
-                # 3. CALCULATE OI CHANGE
-                curr_oi = float(curr['OI'])
-                prev_oi = float(prev['OI'])
-                
+                # OI Logic
                 oi_chg_pct = 0.0
-                if prev_oi > 0:
-                    oi_chg_pct = round(((curr_oi - prev_oi) / prev_oi) * 100, 2)
+                if prev['OI'] > 0:
+                    oi_chg_pct = round(((curr['OI'] - prev['OI']) / prev['OI']) * 100, 2)
                 
-                # 4. INITIAL FILTER: Technicals (Bulls vs Bears)
-                # Note: ADX logic kept (Trend Strength)
-                is_bull = False
-                is_bear = False
+                sentiment = get_oi_analysis(price_chg, oi_chg_pct)
                 
-                # Bullish Criteria
+                row = {
+                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
+                    "LTP": round(ltp, 2),
+                    "Mom %": mom_pct,
+                    "Price Chg%": price_chg,
+                    "RSI": round(curr_rsi, 1),
+                    "ADX": round(curr_adx, 1),
+                    "OI Chg%": oi_chg_pct,
+                    "Analysis": sentiment
+                }
+                
+                # Filters
                 if price_chg > 0.5 and curr_rsi > 60 and curr_adx > 20:
-                    is_bull = True
-                # Bearish Criteria
+                    bullish_list.append(row)
                 elif price_chg < -0.5 and curr_rsi < 45 and curr_adx > 20:
-                    is_bear = True
-                
-                # 5. SECONDARY CHECK: OI Integration (Only if Technicals Pass)
-                if is_bull or is_bear:
-                    sentiment = get_oi_analysis(price_chg, oi_chg_pct)
+                    bearish_list.append(row)
                     
-                    row = {
-                        "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
-                        "Contract": contract_name,
-                        "LTP": round(ltp, 2),
-                        "Mom %": momentum_pct,
-                        "RSI": round(curr_rsi, 1),
-                        "ADX": round(curr_adx, 1),
-                        "OI Chg%": oi_chg_pct,
-                        "Sentiment": sentiment # This helps find "Strong" momentum
-                    }
-                    
-                    if is_bull: bullish_list.append(row)
-                    if is_bear: bearish_list.append(row)
-            
-        except Exception: pass
-        
-        # Progress & Rate Limit
+        except: pass
         progress_bar.progress((i + 1) / len(target_symbols))
-        time.sleep(0.05) # Tiny sleep to be polite
+        time.sleep(0.05)
         
     progress_bar.empty()
     
-    # --- DISPLAY LOGIC ---
+    # --- DISPLAY TABLES ---
     col_config = {
         "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
-        "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%")
+        "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
+        "Price Chg%": st.column_config.NumberColumn("Price Chg%", format="%.2f%%")
     }
     
     c1, c2 = st.columns(2)
     
     with c1:
-        st.success(f"🟢 BULLS ({len(bullish_list)})")
+        st.success(f"🟢 ACTIVE BULLS ({len(bullish_list)})")
         if bullish_list:
-            df_bull = pd.DataFrame(bullish_list)
-            # Prioritize "Short Covering" as it's the strongest intraday move
-            # Sort by Mom% usually, but users can see Sentiment
             st.dataframe(
-                df_bull.sort_values(by="Mom %", ascending=False).head(15),
+                pd.DataFrame(bullish_list).sort_values(by="Mom %", ascending=False).head(15),
                 use_container_width=True, hide_index=True, column_config=col_config
             )
-        else:
-            st.info("No bullish setups found.")
+        else: st.info("No bullish setups found.")
             
     with c2:
-        st.error(f"🔴 BEARS ({len(bearish_list)})")
+        st.error(f"🔴 ACTIVE BEARS ({len(bearish_list)})")
         if bearish_list:
-            df_bear = pd.DataFrame(bearish_list)
-            # Prioritize "Long Unwinding" or "Short Buildup"
             st.dataframe(
-                df_bear.sort_values(by="Mom %", ascending=True).head(15),
+                pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15),
                 use_container_width=True, hide_index=True, column_config=col_config
             )
-        else:
-            st.info("No bearish setups found.")
+        else: st.info("No bearish setups found.")
 
-    st.markdown(f"<div style='text-align:right; color:grey;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} | Powered by: i-Tech World</div>", unsafe_allow_html=True)
 
 if dhan:
     refreshable_data_tables()
