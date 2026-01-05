@@ -87,26 +87,26 @@ STOCKS = {
 
 # --- 5. FUNCTIONS ---
 
-def fetch_live_batch(keys_list, mode='LTP'):
+def fetch_live_batch(keys_list, mode='FULL'):
     """
-    Fetches data in small batches to prevent total failure.
-    mode='LTP' (Stocks) or 'OHLC' (Indices)
+    Fetches data in batches.
+    Switched mode='FULL' to use get_full_market_quote (safest option).
     """
     if not keys_list: return {}
     
     combined_data = {}
-    BATCH_SIZE = 10 # Request 10 at a time
+    BATCH_SIZE = 10 
     
     for i in range(0, len(keys_list), BATCH_SIZE):
         batch = keys_list[i:i+BATCH_SIZE]
         keys_str = ",".join(batch)
         
         try:
-            if mode == 'LTP':
-                # Use LTP endpoint for Stocks (Lighter)
-                response = quote_api.get_market_quote_ltp(symbol=keys_str, api_version='2.0')
+            if mode == 'FULL':
+                # FIX: Using standard full_market_quote which definitely exists
+                response = quote_api.get_full_market_quote(symbol=keys_str, api_version='2.0')
             else:
-                # Use OHLC endpoint for Indices (Need Open Price)
+                # OHLC for Indices
                 response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
                 
             if response.status == 'success':
@@ -160,10 +160,7 @@ def extract_price_robust(response_data, target_key):
         # Object Access
         else:
             ltp = float(data_item.last_price)
-            # Try/Except for OHLC as LTP endpoint might not have it
-            try: ref_price = float(data_item.ohlc.open)
-            except: pass
-            
+            ref_price = float(data_item.ohlc.open)
     except: pass
 
     return ltp, ref_price
@@ -209,11 +206,12 @@ def scanner():
     
     valid_keys = list(STOCKS.values())
     
-    # 1. BATCH FETCH (LTP MODE - Faster/Safer)
-    live_quotes = fetch_live_batch(valid_keys, mode='LTP')
+    # 1. BATCH FETCH (FULL MODE)
+    # Reverted to FULL mode since LTP mode is missing in your SDK
+    live_quotes = fetch_live_batch(valid_keys, mode='FULL')
     
     if SHOW_DEBUG:
-        with st.expander("🔍 Scanner Debug (LTP Data)", expanded=True):
+        with st.expander("🔍 Scanner Debug (Live Quotes)", expanded=True):
             st.write(f"Fetched {len(live_quotes)} items from API.")
             st.write(live_quotes)
     
@@ -252,7 +250,7 @@ def scanner():
                 "ADX": round(last['ADX'], 2)
             }
             
-            # 5. FILTER (Relaxed for testing)
+            # 5. FILTER
             if mom_pct > 0.1 and last['RSI'] > 55: bulls.append(row)
             elif mom_pct < -0.1 and last['RSI'] < 45: bears.append(row)
             
