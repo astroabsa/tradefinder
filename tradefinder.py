@@ -37,75 +37,59 @@ if not st.session_state["authenticated"]:
             else: st.error("Invalid Credentials")
     st.stop()
 
-# --- 3. DHAN API SETUP ---
-st.sidebar.title("⚡ Dhan API Settings")
-if st.sidebar.button("Log out"):
-    st.session_state["authenticated"] = False; st.rerun()
-
-# Inputs for Dhan Credentials
-CLIENT_ID = st.sidebar.text_input("Client ID", value=st.secrets.get("DHAN_CLIENT_ID", ""))
-ACCESS_TOKEN = st.sidebar.text_input("Access Token", type="password", value=st.secrets.get("DHAN_ACCESS_TOKEN", ""))
-
-if not CLIENT_ID or not ACCESS_TOKEN:
-    st.warning("⚠️ Please enter your Dhan Client ID and Access Token in the sidebar to start.")
+# --- 3. DHAN API SETUP (FROM SECRETS) ---
+try:
+    CLIENT_ID = st.secrets["DHAN_CLIENT_ID"]
+    ACCESS_TOKEN = st.secrets["DHAN_ACCESS_TOKEN"]
+except Exception:
+    st.error("⚠️ Secrets Missing! Please add 'DHAN_CLIENT_ID' and 'DHAN_ACCESS_TOKEN' to your .streamlit/secrets.toml file.")
     st.stop()
 
 # Initialize Dhan Object
 try:
     dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
 except Exception as e:
-    st.error(f"Connection Failed: {e}")
+    st.error(f"Dhan Connection Failed: {e}")
     st.stop()
 
-# --- 4. SMART MASTER LIST (FIXED URL) ---
+# --- 4. SMART MASTER LIST ---
 @st.cache_data(ttl=3600*24)
 def get_dhan_master_map():
     """Downloads Dhan's Scrip Master to map Symbols -> Security IDs"""
     symbol_map = {}
     index_map = {}
     try:
-        # FIX: Updated to correct v2 API URL
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         s = requests.get(url).content
         df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         
-        # DEBUG: Show columns if key error persists
-        # st.write("Debug Columns:", df.columns.tolist())
-        
         # Filter for NSE Equity and Indices
-        # 'SEM_EXM_EXCH_ID': 'NSE', 'SEM_INSTRUMENT_NAME': 'EQUITY'
         eq_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'EQUITY')]
         idx_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'INDEX')]
         
-        # Create Maps: { 'RELIANCE': '2885' }
         symbol_map = dict(zip(eq_df['SEM_TRADING_SYMBOL'], eq_df['SEM_SMST_SECURITY_ID']))
         index_map = dict(zip(idx_df['SEM_TRADING_SYMBOL'], idx_df['SEM_SMST_SECURITY_ID']))
         
     except Exception as e:
         st.error(f"Master List Error: {e}")
-        # If error, show what columns we actually got
-        try: st.write("Columns found:", df.columns.tolist())
-        except: pass
     
     return symbol_map, index_map
 
-with st.spinner("Downloading Scrip Master..."):
+with st.spinner("Connecting to DhanHQ..."):
     SYMBOL_MAP, INDEX_MAP = get_dhan_master_map()
 
 # --- 5. DATA FETCHING ---
 def fetch_15min_data(security_id, exchange_segment='NSE_EQ'):
-    """
-    Fetches 15-min candles using Dhan Historical API.
-    """
+    """Fetches 15-min candles using Dhan v2 API."""
     try:
         to_d = datetime.now().strftime("%Y-%m-%d")
         from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         
-        res = dhan.historical_minute_charts(
-            symbol=str(security_id),
+        # Using correct v2 endpoint
+        res = dhan.intraday_minute_data(
+            security_id=str(security_id),
             exchange_segment=exchange_segment,
-            instrument_type='EQUITY',
-            expiry_code=0,
+            instrument_type='EQUITY' if exchange_segment == 'NSE_EQ' else 'INDEX',
             from_date=from_d,
             to_date=to_d,
             interval=15 
@@ -113,7 +97,8 @@ def fetch_15min_data(security_id, exchange_segment='NSE_EQ'):
         
         if res['status'] == 'success':
             data = res['data']
-            # Convert to DF
+            if not data: return None
+            
             df = pd.DataFrame({
                 'timestamp': data['start_Time'],
                 'open': data['open'],
@@ -123,20 +108,18 @@ def fetch_15min_data(security_id, exchange_segment='NSE_EQ'):
                 'volume': data['volume']
             })
             return df
-            
-    except Exception as e:
-        pass
+    except Exception: pass
     return None
 
-# --- 6. DASHBOARD (Indices) ---
+# --- 6. DASHBOARD ---
 @st.fragment(run_every=60)
 def market_dashboard():
+    st.markdown("## 🚀 Absa's DhanHQ Live Screener")
+    
     def get_index_val(name, dhan_symbol):
         if dhan_symbol in INDEX_MAP:
             sec_id = INDEX_MAP[dhan_symbol]
-            # Indices are usually 'IDX_I'
             df = fetch_15min_data(sec_id, exchange_segment='IDX_I') 
-            
             if df is not None and not df.empty:
                 ltp = df.iloc[-1]['close']
                 prev = df.iloc[-2]['close']
@@ -162,7 +145,7 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER (Stocks) ---
+# --- 7. SCANNER ---
 @st.fragment(run_every=60)
 def scanner():
     target_stocks = [
@@ -172,11 +155,14 @@ def scanner():
     ]
     
     all_stocks = []
+    debug_exp = st.expander("🔍 Scanner Debug (Check Errors)", expanded=False)
+    
     bar = st.progress(0, "Scanning DhanHQ (15-Min)...")
     
     for i, symbol in enumerate(target_stocks):
         try:
             if symbol not in SYMBOL_MAP:
+                debug_exp.write(f"❌ {symbol} not found in Master List")
                 continue
             sec_id = SYMBOL_MAP[symbol]
             
@@ -190,7 +176,6 @@ def scanner():
                 df['EMA'] = ta.ema(df['close'], 5)
                 
                 curr = df.iloc[-1]
-                
                 ltp = curr['close']
                 curr_rsi = round(curr['RSI'], 2)
                 curr_adx = round(curr['ADX'], 2)
@@ -213,8 +198,11 @@ def scanner():
                     "Nature": nature
                 }
                 all_stocks.append(row)
+            else:
+                debug_exp.write(f"⚠️ No Data for {symbol} (Sec ID: {sec_id})")
                 
         except Exception as e:
+            debug_exp.write(f"❌ Error {symbol}: {e}")
             pass
             
         bar.progress((i + 1) / len(target_stocks))
@@ -242,7 +230,7 @@ def scanner():
             use_container_width=True, hide_index=True, column_config=col_conf
         )
     else:
-        st.info("Waiting for data... (Check API Credentials)")
+        st.info("Waiting for data... Check the 'Scanner Debug' section above for details.")
         
     st.markdown(f"<div style='text-align:left; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
 
