@@ -57,25 +57,27 @@ configuration.access_token = ACCESS_TOKEN
 history_api = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
 quote_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
 
-# --- 4. SMART MAPPER (UPDATED FOR INDICES) ---
+# --- 4. SMART MAPPER (STRICT) ---
 @st.cache_data(ttl=3600*12) 
 def get_upstox_master_map():
     symbol_map = {}
     index_map = {}
     try:
-        # Download NSE Equity & Index Master List
         url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
         with gzip.GzipFile(fileobj=io.BytesIO(requests.get(url).content)) as f:
             df = pd.read_json(f)
         
-        # 1. Map Equities (RELIANCE, TCS...)
+        # Equities
         eq_df = df[df['segment'] == 'NSE_EQ']
         symbol_map = dict(zip(eq_df['trading_symbol'], eq_df['instrument_key']))
         
-        # 2. Map Indices (Nifty 50, Nifty Bank...)
-        # We clean the names to make lookup easier
-        idx_df = df[df['segment'] == 'NSE_INDEX']
-        index_map = dict(zip(idx_df['trading_symbol'], idx_df['instrument_key']))
+        # Indices - FORCE CORRECT KEYS
+        # We manually find Nifty 50 and Bank Nifty to be 100% sure
+        nifty = df[df['trading_symbol'] == 'Nifty 50']['instrument_key'].values
+        bank = df[df['trading_symbol'] == 'Nifty Bank']['instrument_key'].values
+        
+        if len(nifty) > 0: index_map['Nifty 50'] = nifty[0]
+        if len(bank) > 0: index_map['Nifty Bank'] = bank[0]
         
     except Exception as e:
         st.error(f"Master List Error: {e}")
@@ -83,16 +85,26 @@ def get_upstox_master_map():
     return symbol_map, index_map
 
 SYMBOL_MAP, INDEX_MAP = get_upstox_master_map()
-FNO_SYMBOLS = ['RELIANCE.NS', 'INFY.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 'ADANIENT.NS']
+# Full list of stocks to scan
+FNO_SYMBOLS = [
+    'RELIANCE.NS', 'INFY.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 
+    'ADANIENT.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'LT.NS', 'ITC.NS', 'BAJFINANCE.NS'
+]
 
 # --- 5. FUNCTIONS ---
 def fetch_live_quotes(keys_list):
+    """
+    Fetches LIGHTWEIGHT OHLC Quote (Faster & Less prone to errors)
+    """
     if not keys_list: return {}
     try:
-        response = quote_api.get_full_market_quote(",".join(keys_list), '2.0')
-        if response.status == 'success': return response.data
+        keys_str = ",".join(keys_list)
+        # CHANGED: Using get_market_quote_ohlc instead of full_market_quote
+        response = quote_api.get_market_quote_ohlc(keys_str, '2.0')
+        if response.status == 'success':
+            return response.data
     except Exception as e:
-        if SHOW_DEBUG: st.error(f"Quote Error: {e}")
+        if SHOW_DEBUG: st.error(f"Live Quote Error: {e}")
     return {}
 
 def fetch_history(key):
@@ -109,13 +121,12 @@ def fetch_history(key):
     return None
 
 # --- 6. DASHBOARD ---
-@st.fragment(run_every=5) 
+@st.fragment(run_every=2) # 2 Second Refresh for LIVE feel
 def market_dashboard():
-    # DYNAMIC KEY LOOKUP (Fixes the 0.00 issue!)
-    # We look up the official key from the master list we downloaded
+    # Force correct keys from mapper
     nifty_key = INDEX_MAP.get("Nifty 50", "NSE_INDEX|Nifty 50")
     bank_key = INDEX_MAP.get("Nifty Bank", "NSE_INDEX|Nifty Bank")
-    sensex_key = "BSE_INDEX|SENSEX" # Sensex is usually static
+    sensex_key = "BSE_INDEX|SENSEX"
     
     indices = {
         "NIFTY 50": nifty_key,
@@ -123,34 +134,25 @@ def market_dashboard():
         "SENSEX": sensex_key
     }
     
-    # Live Fetch
+    # 1. LIVE FETCH
     live_data = fetch_live_quotes(list(indices.values()))
     
-    # DEBUG VIEW (Safely Print Data)
     if SHOW_DEBUG:
-        with st.expander("🔍 Raw API Response", expanded=True):
-            st.write(live_data if live_data else "No Data Received (Check Token Permissions)")
+        with st.expander("🔍 Raw Live Data", expanded=True):
+            st.write(live_data)
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
     def get_val(key):
-        ltp, pct = 0.0, 0.0
-        # 1. Try Live Data
         if live_data and key in live_data:
             q = live_data[key]
+            # OHLC Endpoint structure: { ohlc: { close: ..., open: ... }, last_price: ... }
             ltp = q.last_price
             close = q.ohlc.close
-            if close > 0: pct = ((ltp - close)/close)*100
-            
-        # 2. Fallback to History if Live is 0 (e.g. Market Closed or Data Feed issue)
-        if ltp == 0:
-            hist = fetch_history(key)
-            if hist is not None and not hist.empty:
-                ltp = hist.iloc[-1]['close']
-                close = hist.iloc[-2]['close'] # Prev candle
-                if close > 0: pct = ((ltp - close)/close)*100
-                
-        return ltp, pct
+            if close > 0:
+                pct = ((ltp - close)/close)*100
+                return ltp, pct
+        return 0.0, 0.0
 
     n_ltp, n_pct = get_val(indices["NIFTY 50"])
     b_ltp, b_pct = get_val(indices["BANK NIFTY"])
@@ -175,33 +177,45 @@ def scanner():
     bulls, bears = [], []
     bar = st.progress(0, "Scanning...")
     
-    valid_keys = [SYMBOL_MAP.get(s.replace('.NS','')) for s in FNO_SYMBOLS if s.replace('.NS','') in SYMBOL_MAP]
+    # Resolve keys
+    valid_keys = []
+    key_to_name = {}
+    
+    for s in FNO_SYMBOLS:
+        clean = s.replace('.NS','')
+        if clean in SYMBOL_MAP:
+            k = SYMBOL_MAP[clean]
+            valid_keys.append(k)
+            key_to_name[k] = clean
+            
+    # Batch Fetch Live Prices
     live_quotes = fetch_live_quotes(valid_keys)
     
     for i, key in enumerate(valid_keys):
         try:
-            # 1. Get Live Price
-            ltp = 0
+            # 1. LIVE PRICE (Priority)
+            ltp = 0.0
             if key in live_quotes:
                 ltp = live_quotes[key].last_price
             
-            # 2. Get History
+            # 2. INDICATORS (History)
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
-            # Fallback LTP from history if live failed
+            # If Live API failed, fallback to history close (better than 0)
             if ltp == 0: ltp = df.iloc[-1]['close']
             
-            # Indicators
+            # Calc
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
             df['EMA'] = ta.ema(df['close'], 5)
             
             last = df.iloc[-1]
+            # MOMENTUM: Compare LIVE PRICE to EMA (Most active signal)
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
             row = {
-                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{SYMBOL_MAP.get(key, 'Unknown')}", # Simplified
+                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{key_to_name[key]}",
                 "LTP": ltp, "Mom %": mom_pct,
                 "RSI": round(last['RSI'], 2), "ADX": round(last['ADX'], 2)
             }
@@ -214,7 +228,7 @@ def scanner():
     
     bar.empty()
     
-    col_conf = {"Symbol": st.column_config.LinkColumn("Script"), "LTP": st.column_config.NumberColumn("Price", format="₹%.2f")}
+    col_conf = {"Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"), "LTP": st.column_config.NumberColumn("Price", format="₹%.2f")}
     
     c1, c2 = st.columns(2)
     with c1:
