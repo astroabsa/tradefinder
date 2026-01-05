@@ -84,7 +84,6 @@ def get_upstox_master_map():
     return symbol_map, index_map
 
 SYMBOL_MAP, INDEX_MAP = get_upstox_master_map()
-# Full list of stocks to scan
 FNO_SYMBOLS = [
     'RELIANCE.NS', 'INFY.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 
     'ADANIENT.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'LT.NS', 'ITC.NS', 'BAJFINANCE.NS',
@@ -94,13 +93,9 @@ FNO_SYMBOLS = [
 
 # --- 5. FUNCTIONS ---
 def fetch_live_quotes(keys_list):
-    """
-    Fetches LIGHTWEIGHT OHLC Quote
-    """
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        # API call with explicit interval
         response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
         if response.status == 'success':
             return response.data
@@ -125,9 +120,9 @@ def fetch_history(key):
     return None
 
 # --- 6. DASHBOARD ---
-@st.fragment(run_every=2) # 2 Second Refresh for LIVE feel
+@st.fragment(run_every=2)
 def market_dashboard():
-    # Force correct keys from mapper
+    # Correct Keys
     nifty_key = INDEX_MAP.get("Nifty 50", "NSE_INDEX|Nifty 50")
     bank_key = INDEX_MAP.get("Nifty Bank", "NSE_INDEX|Nifty Bank")
     sensex_key = "BSE_INDEX|SENSEX"
@@ -138,7 +133,7 @@ def market_dashboard():
         "SENSEX": sensex_key
     }
     
-    # 1. LIVE FETCH
+    # Live Fetch
     live_data = fetch_live_quotes(list(indices.values()))
     
     if SHOW_DEBUG:
@@ -147,30 +142,30 @@ def market_dashboard():
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
-    # FIX: Robust Value Extraction (Handles Dictionary Access)
+    # --- THE FIX: HANDLE DICTIONARY VS OBJECT ---
     def get_val(key):
         if live_data and key in live_data:
             q = live_data[key]
             
-            # --- THE FIX IS HERE ---
-            # We try dictionary access ['key'] first, as your debug logs show it's a dict
+            # 1. Try Dictionary Access (Primary)
             try:
-                ltp = float(q['last_price'])
-                ohlc = q['ohlc']
-                close = float(ohlc['close'])
-                if close == 0: close = float(ohlc['open'])
-            except:
-                # Fallback to Object Access (dot notation)
-                try:
+                if isinstance(q, dict):
+                    ltp = float(q.get('last_price', 0))
+                    ohlc = q.get('ohlc', {})
+                    close = float(ohlc.get('close', 0))
+                    if close == 0: close = float(ohlc.get('open', 0))
+                else:
+                    # 2. Try Object Access (Fallback)
                     ltp = float(q.last_price)
                     close = float(q.ohlc.close)
                     if close == 0: close = float(q.ohlc.open)
-                except:
-                    return 0.0, 0.0
-            
-            if close > 0:
-                pct = ((ltp - close)/close)*100
-                return ltp, pct
+                
+                if close > 0:
+                    pct = ((ltp - close)/close)*100
+                    return ltp, pct
+            except Exception as e:
+                # if SHOW_DEBUG: st.error(f"Parse Error {key}: {e}")
+                pass
                 
         return 0.0, 0.0
 
@@ -197,7 +192,6 @@ def scanner():
     bulls, bears = [], []
     bar = st.progress(0, "Scanning...")
     
-    # Resolve keys and create a REVERSE MAP for correct naming
     valid_keys = []
     key_to_name = {}
     
@@ -206,41 +200,35 @@ def scanner():
         if clean in SYMBOL_MAP:
             k = SYMBOL_MAP[clean]
             valid_keys.append(k)
-            key_to_name[k] = clean # Store "RELIANCE" for key "NSE_EQ|..."
+            key_to_name[k] = clean
             
-    # Batch Fetch Live Prices
     live_quotes = fetch_live_quotes(valid_keys)
     
     for i, key in enumerate(valid_keys):
         try:
-            # 1. LIVE PRICE (Priority)
             ltp = 0.0
             
-            # Updated: Dictionary Access Logic for Scanner too
+            # Same Fix for Scanner Logic
             if key in live_quotes:
+                q = live_quotes[key]
                 try:
-                    ltp = float(live_quotes[key]['last_price'])
-                except:
-                    try: ltp = float(live_quotes[key].last_price)
-                    except: pass
+                    if isinstance(q, dict):
+                        ltp = float(q.get('last_price', 0))
+                    else:
+                        ltp = float(q.last_price)
+                except: pass
             
-            # 2. INDICATORS (History)
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
-            # If Live API failed, fallback to history close
             if ltp == 0: ltp = df.iloc[-1]['close']
             
-            # Calc
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
             df['EMA'] = ta.ema(df['close'], 5)
             
             last = df.iloc[-1]
-            # MOMENTUM: Compare LIVE PRICE to EMA (Most active signal)
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
-            
-            # FIX: Ensure correct name lookup
             symbol_name = key_to_name.get(key, "Unknown")
             
             row = {
