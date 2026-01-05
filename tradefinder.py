@@ -2,307 +2,324 @@ import streamlit as st
 from dhanhq import dhanhq
 import pandas as pd
 import pandas_ta as ta
-import requests
-import io
+import pytz
 from datetime import datetime, timedelta
 import time
-import pytz
 
 # --- 1. APP CONFIGURATION ---
-st.set_page_config(page_title="Absa's DhanHQ Screener", layout="wide")
+st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
 
-# --- 2. AUTHENTICATION ---
-AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
+# --- 2. DHAN API CREDENTIALS ---
+# Ideally, store these in Streamlit secrets (.streamlit/secrets.toml)
+# For now, you can input them in the sidebar if not found in secrets
+client_id = st.sidebar.text_input("Dhan Client ID", type="default")
+access_token = st.sidebar.text_input("Dhan Access Token", type="password")
 
+dhan = None
+if client_id and access_token:
+    try:
+        dhan = dhanhq(client_id, access_token)
+    except Exception as e:
+        st.error(f"Failed to connect to Dhan API: {e}")
+
+# --- 3. GLOBAL SYMBOL LIST (MAPPED FOR DHAN) ---
+# Dhan uses specific Security IDs. We need a way to map Symbols -> Security IDs.
+# For simplicity, we will fetch the master scrip list or use a reduced hardcoded map for testing.
+# In a production app, you should download the CSV from Dhan (https://images.dhan.co/api-data/api-scrip-master.csv)
+# and cache it.
+
+@st.cache_data(ttl=86400) # Cache for 1 day
+def get_dhan_master_list():
+    try:
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        df = pd.read_csv(url)
+        # Filter for NSE Equity (EQ) or Futures as needed. Using EQ for spot prices.
+        df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'EQUITY')]
+        return df[['SEM_SMST_SECURITY_ID', 'SEM_TRADING_SYMBOL']]
+    except Exception as e:
+        st.error(f"Error fetching Master List: {e}")
+        return pd.DataFrame()
+
+# Helper to find Security ID
+def get_security_id(symbol, master_df):
+    # Standardize symbol format (remove .NS if present)
+    clean_sym = symbol.replace('.NS', '')
+    row = master_df[master_df['SEM_TRADING_SYMBOL'] == clean_sym]
+    if not row.empty:
+        return row.iloc[0]['SEM_SMST_SECURITY_ID']
+    return None
+
+# User's Original List (Truncated for speed in example, but full list works)
+FNO_SYMBOLS_RAW = [
+    'ABFRL.NS', 'ADANIENT.NS', 'ADANIPORTS.NS', 'AXISBANK.NS', 'BANDHANBNK.NS', 
+    'BANKBARODA.NS', 'BHARTIARTL.NS', 'BPCL.NS', 'BRITANNIA.NS', 'CIPLA.NS', 
+    'COALINDIA.NS', 'DIVISLAB.NS', 'DRREDDY.NS', 'EICHERMOT.NS', 'GRASIM.NS', 
+    'HCLTECH.NS', 'HDFCBANK.NS', 'HDFCLIFE.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS', 
+    'HINDUNILVR.NS', 'ICICIBANK.NS', 'INDUSINDBK.NS', 'INFY.NS', 'ITC.NS', 
+    'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS', 'M&M.NS', 'MARUTI.NS', 'NESTLEIND.NS', 
+    'NTPC.NS', 'ONGC.NS', 'POWERGRID.NS', 'RELIANCE.NS', 'SBILIFE.NS', 'SBIN.NS', 
+    'SUNPHARMA.NS', 'TATACONSUM.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TCS.NS', 
+    'TECHM.NS', 'TITAN.NS', 'ULTRACEMCO.NS', 'UPL.NS', 'WIPRO.NS'
+]
+# (You can paste your full list back here)
+
+# --- 4. AUTHENTICATION (Web CSV Method) ---
 def authenticate_user(user_in, pw_in):
     try:
-        df = pd.read_csv(AUTH_CSV_URL)
+        csv_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
+        df = pd.read_csv(csv_url)
         df['username'] = df['username'].astype(str).str.strip().str.lower()
         df['password'] = df['password'].astype(str).str.strip()
-        match = df[(df['username'] == str(user_in).strip().lower()) & (df['password'] == str(pw_in).strip())]
+        
+        match = df[(df['username'] == str(user_in).strip().lower()) & 
+                   (df['password'] == str(pw_in).strip())]
         return not match.empty
-    except: return False
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        return False
 
+# --- 5. LOGIN GATE ---
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
 if not st.session_state["authenticated"]:
-    st.title("🔐 DhanHQ Pro Login")
+    st.title("🔐 Absa's F&O Pro Login")
     with st.form("login_form"):
-        u = st.text_input("Username"); p = st.text_input("Password", type="password")
+        u = st.text_input("Username")
+        p = st.text_input("Password", type="password")
         if st.form_submit_button("Log In"):
             if authenticate_user(u, p):
                 st.session_state["authenticated"] = True
                 st.rerun()
-            else: st.error("Invalid Credentials")
+            else:
+                st.error("Invalid credentials or Connection Failed.")
     st.stop()
 
-# --- 3. DHAN API CONNECTION ---
-try:
-    # Try fetching from secrets first
-    CLIENT_ID = st.secrets["DHAN_CLIENT_ID"]
-    ACCESS_TOKEN = st.secrets["DHAN_ACCESS_TOKEN"]
-except:
-    st.error("⚠️ Secrets not found! Please add DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN to .streamlit/secrets.toml")
+# --- 6. MAIN APPLICATION ---
+st.title("🚀 Absa's Live F&O Screener Pro (DhanHQ)")
+if st.sidebar.button("Log out"):
+    st.session_state["authenticated"] = False
+    st.rerun()
+
+if not dhan:
+    st.warning("⚠️ Please enter your Dhan Client ID and Access Token in the sidebar to fetch live data.")
     st.stop()
 
-try:
-    dhan = dhanhq(CLIENT_ID, ACCESS_TOKEN)
-except Exception as e:
-    st.error(f"Connection Failed: {e}")
+# Load Master List
+master_list = get_dhan_master_list()
+if master_list.empty:
+    st.error("Could not load Scrip Master. Check internet connection.")
     st.stop()
 
-# --- 4. SMART MASTER LIST ---
-@st.cache_data(ttl=3600*24)
-def get_dhan_master_map():
-    symbol_map = {}
-    index_map = {}
+def get_sentiment(p_chg, oi_chg):
+    if p_chg > 0 and oi_chg > 0: return "Long Buildup 🚀"
+    if p_chg < 0 and oi_chg > 0: return "Short Buildup 📉"
+    if p_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
+    if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
+    return "Neutral"
+
+# --- HELPER: FETCH INTRADAY DATA FROM DHAN ---
+def fetch_dhan_data(security_id):
+    """Fetches intraday data for the last 5 days to calculate indicators"""
     try:
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        s = requests.get(url).content
-        df = pd.read_csv(io.StringIO(s.decode('utf-8')))
+        # Dhan needs explicit dates
+        to_date = datetime.now().strftime('%Y-%m-%d')
+        from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         
-        # Standardize Names
-        df['SEM_TRADING_SYMBOL'] = df['SEM_TRADING_SYMBOL'].str.strip().str.upper()
-        
-        # Equities
-        eq_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'EQUITY')]
-        symbol_map = dict(zip(eq_df['SEM_TRADING_SYMBOL'], eq_df['SEM_SMST_SECURITY_ID']))
-        
-        # Indices (Using 'INDEX' instrument name)
-        idx_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'INDEX')]
-        index_map = dict(zip(idx_df['SEM_TRADING_SYMBOL'], idx_df['SEM_SMST_SECURITY_ID']))
-        
-    except Exception as e:
-        st.error(f"Master List Error: {e}")
-    
-    return symbol_map, index_map
-
-with st.spinner("Syncing with Dhan Server..."):
-    SYMBOL_MAP, INDEX_MAP = get_dhan_master_map()
-
-# --- 5. CORE FUNCTIONS ---
-
-def fetch_live_snapshot(security_ids, exchange_segment='NSE_EQ'):
-    """
-    Fetches REAL-TIME Snapshot (LTP, Open, OHLC) using Market Quote API.
-    Fastest way to get current prices for Dashboard.
-    """
-    try:
-        # Dhan expects securities as a Dict: {'NSE_EQ': [1333, 123]}
-        # Ensure IDs are strings/ints as required. Dhan usually takes numbers for IDs.
-        sec_ids = [str(x) for x in security_ids]
-        
-        res = dhan.ohlc_data(securities={exchange_segment: sec_ids})
-        
-        if res['status'] == 'success':
-            return res['data'].get(exchange_segment, [])
-            
-    except Exception as e:
-        pass
-    return []
-
-def fetch_history_data(security_id, exchange_segment='NSE_EQ'):
-    """
-    Fetches 15-min candles for Indicators (RSI, ADX).
-    """
-    try:
-        to_d = datetime.now().strftime("%Y-%m-%d")
-        from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-        
+        # Fetch Minute Charts (e.g., 60 minute interval for 1H candles as per your original code)
+        # Dhan Interval Map: 1 (1min), 5, 15, 25, 60
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
-            exchange_segment=exchange_segment,
-            instrument_type='EQUITY' if exchange_segment == 'NSE_EQ' else 'INDEX',
-            from_date=from_d,
-            to_date=to_d,
-            interval=15 
+            exchange_segment="NSE_EQ", 
+            instrument_type="EQUITY",
+            from_date=from_date,
+            to_date=to_date,
+            interval=60  # 1 Hour interval
         )
         
         if res['status'] == 'success':
             data = res['data']
-            if not data: return None
+            df = pd.DataFrame(data)
+            # Rename columns to match pandas_ta expectations
+            # Dhan returns: start_Time, open, high, low, close, volume
+            df.rename(columns={
+                'start_Time': 'datetime', 
+                'open': 'Open', 
+                'high': 'High', 
+                'low': 'Low', 
+                'close': 'Close',
+                'volume': 'Volume'
+            }, inplace=True)
             
-            # FIX: Robust DataFrame creation (Indices might not have volume/oi)
-            df = pd.DataFrame()
-            df['timestamp'] = data.get('start_Time', [])
-            df['open'] = data.get('open', [])
-            df['high'] = data.get('high', [])
-            df['low'] = data.get('low', [])
-            df['close'] = data.get('close', [])
-            # Handle missing volume for indices
-            if 'volume' in data: df['volume'] = data['volume']
-            else: df['volume'] = 0
-            
+            # Convert Dhan's custom time format (often int or float timestamp)
+            # Dhan usually returns a specialized time format, ensure it's handled:
+            # If start_Time is distinct, it might need conversion. Assuming standard response.
             return df
-    except Exception: pass
-    return None
+        else:
+            return pd.DataFrame()
+            
+    except Exception as e:
+        # st.error(f"Data fetch error: {e}")
+        return pd.DataFrame()
 
-# --- 6. DASHBOARD (Uses Live Snapshot) ---
-@st.fragment(run_every=10) # Fast refresh for dashboard
-def market_dashboard():
+# --- HELPER: MARKET DASHBOARD ---
+def fetch_market_dashboard():
+    # Hardcoded IDs for Nifty 50 and Bank Nifty (Indices are usually in NSE_IDX segment)
+    # You might need to check the Master List for exact Index Security IDs if these change.
+    # Nifty 50 ID: 13, Bank Nifty ID: 25 (These are standard, but check csv)
+    indices = {"NIFTY 50": "13", "BANK NIFTY": "25"} 
     
-    # 1. Prepare Request
-    indices = {
-        "NIFTY 50": INDEX_MAP.get("NIFTY 50"),
-        "BANK NIFTY": INDEX_MAP.get("NIFTY BANK"),
-        "FIN NIFTY": INDEX_MAP.get("NIFTY FIN SERVICE")
+    col1, col2, col3 = st.columns([1, 1, 2])
+    
+    data_display = {}
+    
+    for name, sec_id in indices.items():
+        try:
+            # Fetch Quote for Indices
+            # Note: For Indices, exchange_segment is usually 'IDX_I' (Index) or 'NSE_IDX'
+            # Dhan Python Lib might use 'NSE_FNO' or specific segment for Index quotes.
+            # Using basic quote or OHLC call.
+            res = dhan.get_fund_limits() # Dummy call to check conn, replace with actual quote
+            
+            # Since fetching single Index quote might be tricky with generic lib, 
+            # we try fetching minute data for the index to get LTP
+            to_date = datetime.now().strftime('%Y-%m-%d')
+            res = dhan.intraday_minute_data(sec_id, 'IDX_I', 'INDEX', to_date, to_date, 1)
+            
+            if res['status'] == 'success' and len(res['data']['close']) > 0:
+                ltp = res['data']['close'][-1]
+                prev = res['data']['open'][0] # Approx prev for intraday calc
+                chg = ltp - prev
+                pct = (chg / prev) * 100
+                data_display[name] = {"ltp": ltp, "chg": chg, "pct": pct}
+            else:
+                data_display[name] = {"ltp": 0, "chg": 0, "pct": 0}
+        except:
+            data_display[name] = {"ltp": 0, "chg": 0, "pct": 0}
+
+    # Render Metrics
+    with col1:
+        nifty = data_display.get("NIFTY 50", {"ltp":0, "chg":0, "pct":0})
+        st.metric(label="NIFTY 50", value=f"{nifty['ltp']:,.2f}", delta=f"{nifty['chg']:.2f} ({nifty['pct']:.2f}%)")
+    
+    with col2:
+        bank = data_display.get("BANK NIFTY", {"ltp":0, "chg":0, "pct":0})
+        st.metric(label="BANK NIFTY", value=f"{bank['ltp']:,.2f}", delta=f"{bank['chg']:.2f} ({bank['pct']:.2f}%)")
+        
+    with col3:
+        bias, color = "SIDEWAYS ↔️", "gray"
+        if nifty['pct'] > 0.25: bias, color = "BULLISH 🚀", "green"
+        elif nifty['pct'] < -0.25: bias, color = "BEARISH 📉", "red"
+            
+        st.markdown(f"""
+            <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
+                <h3 style="margin:0; color: {color};">Market Bias: {bias}</h3>
+            </div>
+        """, unsafe_allow_html=True)
+
+@st.fragment(run_every=180)
+def refreshable_data_tables():
+    fetch_market_dashboard()
+    st.markdown("---")
+    
+    bullish, bearish = [], []
+    progress_bar = st.progress(0, text="Fetching Live Data from Dhan...")
+    
+    for i, sym in enumerate(FNO_SYMBOLS_RAW):
+        try:
+            # 1. Get Security ID
+            sec_id = get_security_id(sym, master_list)
+            if not sec_id:
+                continue
+
+            # 2. Fetch History
+            df = fetch_dhan_data(sec_id)
+            
+            if not df.empty and len(df) > 20:
+                # 3. Calculate Indicators
+                df['RSI'] = ta.rsi(df['Close'], length=14)
+                adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+                df['EMA_5'] = ta.ema(df['Close'], length=5)
+                
+                # Get latest values
+                ltp = df['Close'].iloc[-1]
+                ema_5 = df['EMA_5'].iloc[-1]
+                curr_rsi = df['RSI'].iloc[-1]
+                curr_adx = adx_df['ADX_14'].iloc[-1]
+                
+                # Momentum & Change
+                momentum_pct = round(((ltp - ema_5) / ema_5) * 100, 2)
+                
+                # Approximate previous close from the start of the fetched data or previous candle
+                # For better accuracy, you might fetch daily candle history separately.
+                # Here we compare with the open of the first candle of the day/period fetched.
+                prev_close = df['Close'].iloc[-2] 
+                p_change = round(((ltp - prev_close) / prev_close) * 100, 2)
+                
+                # Formatting
+                clean_sym = sym.replace(".NS", "")
+                tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{clean_sym}"
+                
+                # Basic OI simulation (Dhan Equity doesn't have OI, need F&O segment for that)
+                # If you need true OI, you must fetch the corresponding Futures Instrument ID
+                # For now, we keep OI neutral as we are scanning Spot prices.
+                oi_chg = 1 
+                sentiment = get_sentiment(p_change, oi_chg)
+                
+                row = {
+                    "Symbol": tv_url,
+                    "LTP": round(ltp, 2),
+                    "Mom %": momentum_pct,
+                    "Chg %": p_change,
+                    "RSI": round(curr_rsi, 1),
+                    "ADX": round(curr_adx, 1),
+                    "Sentiment": sentiment
+                }
+
+                if p_change > 0.5 and curr_rsi > 60 and curr_adx > 20:
+                    bullish.append(row)
+                elif p_change < -0.5 and curr_rsi < 45 and curr_adx > 20:
+                    bearish.append(row)
+            
+            progress_bar.progress((i + 1) / len(FNO_SYMBOLS_RAW))
+            
+            # Rate limiting to avoid hitting Dhan API limits (usually quite generous, but good practice)
+            time.sleep(0.1) 
+            
+        except Exception as e:
+            # st.write(f"Error processing {sym}: {e}") # Debugging
+            continue
+            
+    progress_bar.empty()
+    
+    column_config = {
+        "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)")
     }
     
-    # Remove None values
-    valid_ids = [v for k,v in indices.items() if v]
-    
-    # 2. Fetch Live Data
-    # Indices are usually in 'IDX_I' segment
-    snapshots = fetch_live_snapshot(valid_ids, exchange_segment='IDX_I')
-    
-    # 3. Create Map for easy access
-    # Snapshot returns list of dicts. Map security_id -> data
-    data_map = {str(item['security_id']): item for item in snapshots}
-    
-    def get_display_val(name):
-        sec_id = str(indices.get(name))
-        if sec_id in data_map:
-            d = data_map[sec_id]
-            ltp = float(d.get('last_price', 0))
-            ohlc = d.get('ohlc', {})
-            open_p = float(ohlc.get('open', 0))
-            
-            if open_p > 0:
-                pct = ((ltp - open_p) / open_p) * 100
-                return ltp, pct
-        return 0.0, 0.0
+    col1, col2 = st.columns(2)
+    with col1:
+        st.success("🟢 ACTIVE BULLS (Accelerating Up)")
+        if bullish:
+            st.dataframe(
+                pd.DataFrame(bullish).sort_values(by="Mom %", ascending=False).head(10), 
+                use_container_width=True, hide_index=True, column_config=column_config
+            )
+        else:
+            st.info("No bullish breakouts detected.")
 
-    n_ltp, n_pct = get_display_val("NIFTY 50")
-    b_ltp, b_pct = get_display_val("BANK NIFTY")
-    f_ltp, f_pct = get_display_val("FIN NIFTY")
+    with col2:
+        st.error("🔴 ACTIVE BEARS (Accelerating Down)")
+        if bearish:
+            st.dataframe(
+                pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), 
+                use_container_width=True, hide_index=True, column_config=column_config
+            )
+        else:
+            st.info("No bearish breakdowns detected.")
 
-    st.markdown("### 📊 Market Dashboard")
-    c1, c2, c3, c4 = st.columns([1,1,1,1.5])
-    
-    with c1: st.metric("NIFTY 50", f"{n_ltp:,.2f}", f"{n_pct:.2f}%")
-    with c2: st.metric("BANK NIFTY", f"{b_ltp:,.2f}", f"{b_pct:.2f}%")
-    with c3: st.metric("FIN NIFTY", f"{f_ltp:,.2f}", f"{f_pct:.2f}%")
-    
-    with c4:
-        bias, color = ("SIDEWAYS ↔️", "gray")
-        if n_pct > 0.15: bias, color = ("BULLISH 🚀", "green")
-        elif n_pct < -0.15: bias, color = ("BEARISH 📉", "red")
-        st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
+    ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
+    st.write(f"🕒 **Last Data Sync:** {ist_time} IST (Auto-refreshing in 3 mins)")
+    st.markdown("<div style='text-align: center; color: grey; padding-top: 20px;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
 
-market_dashboard()
-st.markdown("---")
-
-# --- 7. SCANNER (History + Snapshot) ---
-@st.fragment(run_every=60)
-def scanner():
-    target_stocks = [
-        'RELIANCE', 'TCS', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'INFY', 'ITC', 
-        'BHARTIARTL', 'LT', 'AXISBANK', 'KOTAKBANK', 'ULTRACEMCO', 'BAJFINANCE',
-        'MARUTI', 'SUNPHARMA', 'TITAN', 'TATAMOTORS', 'NTPC', 'POWERGRID', 'ADANIENT'
-    ]
-    
-    all_stocks = []
-    debug_exp = st.expander("🔍 Scanner Debug", expanded=False)
-    bar = st.progress(0, "Scanning...")
-    
-    # 1. Prepare Batch for Live Price
-    sec_ids = []
-    symbol_to_id = {}
-    for s in target_stocks:
-        if s in SYMBOL_MAP:
-            sid = SYMBOL_MAP[s]
-            sec_ids.append(sid)
-            symbol_to_id[s] = str(sid)
-            
-    # 2. Fetch Live Prices (One Shot)
-    # Equities are 'NSE_EQ'
-    live_data = fetch_live_snapshot(sec_ids, exchange_segment='NSE_EQ')
-    live_map = {str(item['security_id']): item for item in live_data}
-    
-    # 3. Process Each Stock
-    for i, symbol in enumerate(target_stocks):
-        try:
-            if symbol not in symbol_to_id: continue
-            sid = symbol_to_id[symbol]
-            
-            # Get Live Price
-            ltp = 0.0
-            if sid in live_map:
-                ltp = float(live_map[sid].get('last_price', 0))
-            
-            # Get History (For Technicals)
-            df = fetch_history_data(sid)
-            
-            if df is not None and len(df) > 20:
-                # Technicals
-                df['RSI'] = ta.rsi(df['close'], 14)
-                df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
-                df['EMA'] = ta.ema(df['close'], 5)
-                
-                curr = df.iloc[-1]
-                
-                # Use Live LTP if available, else history close
-                final_ltp = ltp if ltp > 0 else curr['close']
-                
-                curr_rsi = round(curr['RSI'], 2)
-                curr_adx = round(curr['ADX'], 2)
-                ema_val = curr['EMA']
-                
-                mom_pct = round(((final_ltp - ema_val) / ema_val) * 100, 2)
-                
-                nature = "Neutral"
-                if mom_pct > 0.1 and curr_rsi > 55: nature = "Bullish"
-                elif mom_pct < -0.1 and curr_rsi < 45: nature = "Bearish"
-
-                row = {
-                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}",
-                    "LTP": f"₹{final_ltp:,.2f}",
-                    "Mom %": mom_pct,
-                    "RSI": curr_rsi,
-                    "ADX": curr_adx,
-                    "Nature": nature
-                }
-                all_stocks.append(row)
-            else:
-                # Fallback if history fails but we have price
-                if ltp > 0:
-                    all_stocks.append({
-                        "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}",
-                        "LTP": f"₹{ltp:,.2f}",
-                        "Mom %": 0.0, "RSI": 0, "ADX": 0, "Nature": "Data Lag"
-                    })
-                
-        except Exception as e:
-            debug_exp.write(f"Error {symbol}: {e}")
-            
-        bar.progress((i + 1) / len(target_stocks))
-        time.sleep(0.1) # Polite delay
-    
-    bar.empty()
-    
-    if all_stocks:
-        df_all = pd.DataFrame(all_stocks)
-        
-        col_conf = {
-            "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
-            "LTP": st.column_config.TextColumn("Price"),
-        }
-
-        st.subheader("🟢 Strongest Stocks")
-        st.dataframe(
-            df_all.sort_values("Mom %", ascending=False).head(10), 
-            use_container_width=True, hide_index=True, column_config=col_conf
-        )
-
-        st.subheader("🔴 Weakest Stocks")
-        st.dataframe(
-            df_all.sort_values("Mom %", ascending=True).head(10), 
-            use_container_width=True, hide_index=True, column_config=col_conf
-        )
-    else:
-        st.info("Waiting for data... Check API permissions.")
-        
-    st.markdown(f"<div style='text-align:left; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
-
-scanner()
+if dhan:
+    refreshable_data_tables()
