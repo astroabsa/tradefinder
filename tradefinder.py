@@ -57,47 +57,75 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 5. SMART MASTER LIST (ROBUST MATCHING) ---
+# --- 5. ROBUST MASTER LIST LOADER ---
 @st.cache_data(ttl=3600*4)
 def get_master_data_map():
     fno_map = {}
     index_map = {}
+    
+    # Fail-safe defaults in case CSV fails completely
+    index_map['NIFTY'] = '13'       # Standard NSE ID
+    index_map['BANKNIFTY'] = '25'   # Standard NSE ID
+    
     try:
+        # FIX 1: Add User-Agent to prevent 403 Forbidden errors
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        s = requests.get(url).content
-        df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         
-        df['SEM_TRADING_SYMBOL'] = df['SEM_TRADING_SYMBOL'].str.upper().str.strip()
+        r = requests.get(url, headers=headers)
+        r.raise_for_status() # Check for download errors
         
-        # 1. Stocks Futures (For Scanner)
-        stk_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTSTK')]
+        df = pd.read_csv(io.StringIO(r.content.decode('utf-8')))
+        df.columns = df.columns.str.strip() # Fix whitespace in headers
         
-        # 2. Spot Indices (For Dashboard)
-        idx_df = df[df['SEM_INSTRUMENT_NAME'] == 'INDEX']
+        # FIX 2: Smart Column Detection (Handle format changes)
+        col_exch = 'SEM_EXM_EXCH_ID' if 'SEM_EXM_EXCH_ID' in df.columns else 'EXCH_ID'
+        col_id = 'SEM_SMST_SECURITY_ID' if 'SEM_SMST_SECURITY_ID' in df.columns else 'SECURITY_ID'
+        col_name = 'SEM_TRADING_SYMBOL' if 'SEM_TRADING_SYMBOL' in df.columns else 'TRADING_SYMBOL'
+        col_inst = 'SEM_INSTRUMENT_NAME' if 'SEM_INSTRUMENT_NAME' in df.columns else 'INSTRUMENT'
         
+        # Normalize Symbols
+        df[col_name] = df[col_name].astype(str).str.upper().str.strip()
+        
+        # 1. Stocks Futures (FUTSTK)
+        stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')]
+        
+        # 2. Spot Indices (INDEX)
+        idx_df = df[df[col_inst] == 'INDEX']
+        
+        # Helper to find nearest expiry
         def get_current_futures(dataframe):
-            dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
-            today = pd.Timestamp.now().normalize()
-            valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
-            valid = valid.sort_values(by=['SEM_TRADING_SYMBOL', 'SEM_EXPIRY_DATE'])
-            return valid.drop_duplicates(subset=['SEM_TRADING_SYMBOL'], keep='first')
+            # Try parsing expiry date
+            if 'SEM_EXPIRY_DATE' in dataframe.columns:
+                dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+                today = pd.Timestamp.now().normalize()
+                valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
+                valid = valid.sort_values(by=[col_name, 'SEM_EXPIRY_DATE'])
+                return valid.drop_duplicates(subset=[col_name], keep='first')
+            return dataframe
 
+        # Process Stocks
         curr_stk = get_current_futures(stk_df)
         for _, row in curr_stk.iterrows():
-            base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
-            fno_map[base_sym] = {'id': str(row['SEM_SMST_SECURITY_ID']), 'name': row['SEM_CUSTOM_SYMBOL']}
+            base_sym = row[col_name].split('-')[0]
+            # Use Custom Symbol if available for cleaner display
+            disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
+            fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
             
-        nifty = idx_df[(idx_df['SEM_EXM_EXCH_ID'] == 'NSE') & (idx_df['SEM_TRADING_SYMBOL'] == 'NIFTY 50')]
-        if not nifty.empty: index_map['NIFTY'] = str(nifty.iloc[0]['SEM_SMST_SECURITY_ID'])
+        # Process Spot Indices (Robust Name Match)
+        nifty = idx_df[(idx_df[col_exch] == 'NSE') & (idx_df[col_name] == 'NIFTY 50')]
+        if not nifty.empty: index_map['NIFTY'] = str(nifty.iloc[0][col_id])
         
-        bank = idx_df[(idx_df['SEM_EXM_EXCH_ID'] == 'NSE') & (idx_df['SEM_TRADING_SYMBOL'].isin(['NIFTY BANK', 'BANKNIFTY']))]
-        if not bank.empty: index_map['BANKNIFTY'] = str(bank.iloc[0]['SEM_SMST_SECURITY_ID'])
+        bank = idx_df[(idx_df[col_exch] == 'NSE') & (idx_df[col_name].isin(['NIFTY BANK', 'BANKNIFTY']))]
+        if not bank.empty: index_map['BANKNIFTY'] = str(bank.iloc[0][col_id])
         
-        sensex = idx_df[(idx_df['SEM_EXM_EXCH_ID'] == 'BSE') & (idx_df['SEM_TRADING_SYMBOL'].str.contains('SENSEX'))]
-        if not sensex.empty: index_map['SENSEX'] = str(sensex.iloc[0]['SEM_SMST_SECURITY_ID'])
+        # BSE SENSEX
+        sensex = idx_df[(idx_df[col_exch] == 'BSE') & (idx_df[col_name].str.contains('SENSEX'))]
+        if not sensex.empty: index_map['SENSEX'] = str(sensex.iloc[0][col_id])
 
     except Exception as e:
-        st.error(f"Master List Error: {e}")
+        st.error(f"Master List Error: {e}. Using offline defaults for Dashboard.")
+        # We rely on the hardcoded defaults for Nifty/BankNifty so dashboard doesn't break
     
     return fno_map, index_map
 
@@ -123,7 +151,9 @@ def fetch_futures_data(security_id, interval=60):
             data = res['data']
             if not data: return pd.DataFrame()
             df = pd.DataFrame(data)
-            df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
+            # Rename columns to standard names
+            col_map = {'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}
+            df.rename(columns=col_map, inplace=True)
             return df
     except: pass
     return pd.DataFrame()
@@ -137,9 +167,10 @@ def get_oi_analysis(price_chg, oi_chg):
     return "Neutral ⚪"
 
 
-# --- 8. DASHBOARD ---
+# --- 8. DASHBOARD (SPOT PRICES) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
+    # Configuration for Spot Indices
     indices_config = [
         {"name": "NIFTY 50", "key": "NIFTY", "seg": "IDX_I"},
         {"name": "BANK NIFTY", "key": "BANKNIFTY", "seg": "IDX_I"},
@@ -150,14 +181,18 @@ def refreshable_dashboard():
     
     for item in indices_config:
         key = item['key']
-        if key not in INDEX_MAP: continue
+        # Skip if ID not found (e.g. Sensex if CSV failed)
+        if key not in INDEX_MAP: 
+            data_display[item['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            continue
         
         sec_id = INDEX_MAP[key]
         segment = item['seg']
         
         try:
             to_date = datetime.now().strftime('%Y-%m-%d')
-            from_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
+            # Look back 4 days to ensure we find "Previous Close" even on Mondays/Holidays
+            from_date = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d')
             
             res = dhan.intraday_minute_data(
                 security_id=sec_id,
@@ -169,14 +204,16 @@ def refreshable_dashboard():
             )
             
             if res['status'] == 'success' and res['data'].get('close'):
+                # Latest Price (LTP)
                 ltp = res['data']['close'][-1]
                 
-                # Logic to find "Day Open" roughly
-                # Ideally, we need today's first candle.
-                # Since Intraday API gives a stream, we check date of last candle.
-                # If last candle date == today, finding today's open index.
-                # Simplified: Just compare LTP vs Close 375 minutes ago.
-                prev_price = res['data']['close'][max(0, len(res['data']['close']) - 375)]
+                # Calculate Change: 
+                # We need the close of the *previous* trading day.
+                # Since we fetched 4 days, we can roughly grab a candle from 1 day ago (approx 375 minutes back)
+                # or just use the very first candle of the fetched series if the series is short.
+                data_len = len(res['data']['close'])
+                prev_idx = max(0, data_len - 375) # Approx 1 day ago in minutes
+                prev_price = res['data']['close'][prev_idx]
                 
                 chg = ltp - prev_price
                 pct = (chg / prev_price) * 100
@@ -214,21 +251,25 @@ def refreshable_dashboard():
         """, unsafe_allow_html=True)
 
 
-# --- 9. TABBED SCANNER SYSTEM ---
+# --- 9. SCANNER (TABBED) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
     
-    # Create Tabs
     tab1, tab2 = st.tabs(["🚀 Market Scanners (Signals)", "📋 All F&O Symbols (Data)"])
     
     target_symbols = list(FNO_MAP.keys()) 
+    
+    # If Master List failed, target_symbols might be empty.
+    if not target_symbols:
+        st.error("Scanner Error: No F&O symbols found. Please check API connection or Master List status.")
+        return
+
     progress_bar = st.progress(0, f"Scanning {len(target_symbols)} Futures...")
     
-    # Storage Lists
     bullish_list = []
     bearish_list = []
-    all_data_list = [] # Store everything here
+    all_data_list = []
     
     for i, sym in enumerate(target_symbols):
         try:
@@ -238,7 +279,7 @@ def refreshable_scanner():
             df = fetch_futures_data(sec_id, interval=60)
             
             if not df.empty and len(df) > 20:
-                # Technicals
+                # Indicators
                 df['RSI'] = ta.rsi(df['Close'], length=14)
                 adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
                 df['EMA_5'] = ta.ema(df['Close'], length=5)
@@ -252,14 +293,12 @@ def refreshable_scanner():
                 mom_pct = round(((ltp - df['EMA_5'].iloc[-1]) / df['EMA_5'].iloc[-1]) * 100, 2)
                 price_chg = round(((ltp - prev['Close']) / prev['Close']) * 100, 2)
                 
-                # OI Logic
                 oi_chg_pct = 0.0
                 if prev['OI'] > 0:
                     oi_chg_pct = round(((curr['OI'] - prev['OI']) / prev['OI']) * 100, 2)
                 
                 sentiment = get_oi_analysis(price_chg, oi_chg_pct)
                 
-                # Row Data
                 row = {
                     "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
                     "LTP": round(ltp, 2),
@@ -271,13 +310,12 @@ def refreshable_scanner():
                     "Analysis": sentiment
                 }
                 
-                # 1. Add to Master List (For Tab 2)
-                # We add a clean symbol name for sorting in the big table
+                # Add to Master Data (Tab 2)
                 row_master = row.copy()
-                row_master['CleanSym'] = sym # Hidden column for sorting
+                row_master['CleanSym'] = sym
                 all_data_list.append(row_master)
                 
-                # 2. Filter for Scanners (For Tab 1)
+                # Filters (Tab 1)
                 if price_chg > 0.5 and curr_rsi > 60 and curr_adx > 20:
                     bullish_list.append(row)
                 elif price_chg < -0.5 and curr_rsi < 45 and curr_adx > 20:
@@ -285,68 +323,45 @@ def refreshable_scanner():
                     
         except: pass
         progress_bar.progress((i + 1) / len(target_symbols))
-        time.sleep(0.05)
+        # time.sleep(0.05) # Uncomment if hitting rate limits
         
     progress_bar.empty()
     
-    # --- TAB 1: SCANNERS ---
+    col_config = {
+        "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
+        "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
+        "Price Chg%": st.column_config.NumberColumn("Price Chg%", format="%.2f%%")
+    }
+    
+    # Tab 1
     with tab1:
-        col_config = {
-            "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
-            "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
-            "Price Chg%": st.column_config.NumberColumn("Price Chg%", format="%.2f%%")
-        }
-        
         c1, c2 = st.columns(2)
         with c1:
-            st.success(f"🟢 ACTIVE BULLS ({len(bullish_list)})")
+            st.success(f"🟢 BULLS ({len(bullish_list)})")
             if bullish_list:
                 st.dataframe(pd.DataFrame(bullish_list).sort_values(by="Mom %", ascending=False).head(15), use_container_width=True, hide_index=True, column_config=col_config)
             else: st.info("No bullish setups found.")
-                
         with c2:
-            st.error(f"🔴 ACTIVE BEARS ({len(bearish_list)})")
+            st.error(f"🔴 BEARS ({len(bearish_list)})")
             if bearish_list:
                 st.dataframe(pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=col_config)
             else: st.info("No bearish setups found.")
-            
-    # --- TAB 2: ALL DATA ---
+
+    # Tab 2
     with tab2:
         st.info(f"📋 Showing Data for all {len(all_data_list)} F&O Symbols")
-        
         if all_data_list:
-            df_all = pd.DataFrame(all_data_list)
-            # Sort alphabetically by symbol
-            df_all = df_all.sort_values(by="CleanSym")
-            df_all = df_all.drop(columns=['CleanSym']) # Remove helper column
-            
-            # Allow user to sort/filter via dataframe UI
-            st.dataframe(
-                df_all, 
-                use_container_width=True, 
-                hide_index=True, 
-                column_config={
-                    "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
-                    "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
-                    "Price Chg%": st.column_config.NumberColumn("Price Chg%", format="%.2f%%"),
-                    "RSI": st.column_config.NumberColumn("RSI", format="%.1f"),
-                    "Mom %": st.column_config.NumberColumn("Mom %", format="%.2f%%")
-                },
-                height=800 # Taller table for easy scrolling
-            )
+            df_all = pd.DataFrame(all_data_list).sort_values(by="CleanSym").drop(columns=['CleanSym'])
+            st.dataframe(df_all, use_container_width=True, hide_index=True, column_config=col_config, height=600)
         else:
             st.warning("No data available.")
 
     # Footer
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
     st.write(f"🕒 **Last Data Sync:** {ist_time} IST")
-    st.markdown("""
-        <div style='text-align: center; color: grey; padding-top: 20px;'>
-            Powered by : i-Tech World
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown("<div style='text-align: center; color: grey; padding-top: 20px;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
 
-# --- 10. MAIN APP EXECUTION ---
+# --- 10. EXECUTION ---
 if dhan:
     refreshable_dashboard() 
     refreshable_scanner()
