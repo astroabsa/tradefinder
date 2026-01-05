@@ -109,7 +109,7 @@ def fetch_futures_data(security_id, interval=60):
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
             exchange_segment="NSE_FNO", 
-            instrument_type="FUTSTK",
+            instrument_type="FUTSTK", # Default for Stocks
             from_date=from_date,
             to_date=to_date,
             interval=interval
@@ -124,8 +124,18 @@ def fetch_futures_data(security_id, interval=60):
     except: pass
     return pd.DataFrame()
 
-# --- 7. DASHBOARD LOGIC ---
-def fetch_market_dashboard():
+# --- 7. OI LOGIC ---
+def get_oi_analysis(price_chg, oi_chg):
+    if price_chg > 0 and oi_chg > 0: return "Long Buildup 🟢"
+    if price_chg < 0 and oi_chg > 0: return "Short Buildup 🔴"
+    if price_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
+    if price_chg > 0 and oi_chg < 0: return "Short Covering 🚀"
+    return "Neutral ⚪"
+
+
+# --- 8. COMPONENT: DASHBOARD (Refreshes every 5 sec) ---
+@st.fragment(run_every=5)
+def refreshable_dashboard():
     indices = {
         "NIFTY 50": INDEX_MAP.get("NIFTY", ""), 
         "BANK NIFTY": INDEX_MAP.get("BANKNIFTY", "")
@@ -133,6 +143,7 @@ def fetch_market_dashboard():
     
     data_display = {}
     
+    # Fetch Data for Indices
     for name, sec_id in indices.items():
         if not sec_id: continue
         try:
@@ -180,20 +191,11 @@ def fetch_market_dashboard():
             </div>
         """, unsafe_allow_html=True)
 
-# --- 8. OI LOGIC ---
-def get_oi_analysis(price_chg, oi_chg):
-    if price_chg > 0 and oi_chg > 0: return "Long Buildup 🟢"
-    if price_chg < 0 and oi_chg > 0: return "Short Buildup 🔴"
-    if price_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
-    if price_chg > 0 and oi_chg < 0: return "Short Covering 🚀"
-    return "Neutral ⚪"
 
-# --- 9. MAIN SCANNER LOOP ---
+# --- 9. COMPONENT: SCANNER TABLE (Refreshes every 180 sec) ---
 @st.fragment(run_every=180)
-def refreshable_data_tables():
-    fetch_market_dashboard()
+def refreshable_scanner():
     st.markdown("---")
-    
     bullish_list = []
     bearish_list = []
     
@@ -205,6 +207,7 @@ def refreshable_data_tables():
             futa_data = FNO_MAP[sym]
             sec_id = futa_data['id']
             
+            # Fetch Data (1H Candles)
             df = fetch_futures_data(sec_id, interval=60)
             
             if not df.empty and len(df) > 20:
@@ -271,14 +274,17 @@ def refreshable_data_tables():
             st.dataframe(pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=col_config)
         else: st.info("No bearish setups found.")
 
-    # --- RESTORED FOOTER ---
+    # Footer
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
-    st.write(f"🕒 **Last Data Sync:** {ist_time} IST (Auto-refreshing in 3 mins)")
+    st.write(f"🕒 **Last Data Sync:** {ist_time} IST")
     st.markdown("""
         <div style='text-align: center; color: grey; padding-top: 20px;'>
             Powered by : i-Tech World
         </div>
     """, unsafe_allow_html=True)
 
+# --- 10. MAIN APP EXECUTION ---
 if dhan:
-    refreshable_data_tables()
+    # These two functions now run INDEPENDENTLY at their own speeds
+    refreshable_dashboard() 
+    refreshable_scanner()
