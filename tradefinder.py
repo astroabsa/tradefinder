@@ -57,7 +57,7 @@ configuration.access_token = ACCESS_TOKEN
 history_api = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
 quote_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
 
-# --- 4. SMART MAPPER (STRICT) ---
+# --- 4. SMART MAPPER ---
 @st.cache_data(ttl=3600*12) 
 def get_upstox_master_map():
     symbol_map = {}
@@ -71,7 +71,7 @@ def get_upstox_master_map():
         eq_df = df[df['segment'] == 'NSE_EQ']
         symbol_map = dict(zip(eq_df['trading_symbol'], eq_df['instrument_key']))
         
-        # Indices - Manual Force
+        # Indices - Manual Force to ensure we have valid keys to request
         nifty = df[df['trading_symbol'] == 'Nifty 50']['instrument_key'].values
         bank = df[df['trading_symbol'] == 'Nifty Bank']['instrument_key'].values
         
@@ -96,6 +96,7 @@ def fetch_live_quotes(keys_list):
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
+        # Using OHLC endpoint for live data
         response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
         if response.status == 'success':
             return response.data
@@ -119,60 +120,74 @@ def fetch_history(key):
     except: pass
     return None
 
+def safe_extract_price(data_obj):
+    """Helper to extract price from either Dict or Object"""
+    try:
+        # Try Dict
+        if isinstance(data_obj, dict):
+            ltp = float(data_obj.get('last_price', 0))
+            ohlc = data_obj.get('ohlc', {})
+            close = float(ohlc.get('close', 0))
+            if close == 0: close = float(ohlc.get('open', 0))
+            return ltp, close
+        # Try Object
+        else:
+            ltp = float(data_obj.last_price)
+            close = float(data_obj.ohlc.close)
+            if close == 0: close = float(data_obj.ohlc.open)
+            return ltp, close
+    except:
+        return 0.0, 0.0
+
 # --- 6. DASHBOARD ---
 @st.fragment(run_every=2)
 def market_dashboard():
-    # Correct Keys
-    nifty_key = INDEX_MAP.get("Nifty 50", "NSE_INDEX|Nifty 50")
-    bank_key = INDEX_MAP.get("Nifty Bank", "NSE_INDEX|Nifty Bank")
-    sensex_key = "BSE_INDEX|SENSEX"
+    # 1. Define Request Keys
+    nifty_req = INDEX_MAP.get("Nifty 50", "NSE_INDEX|Nifty 50")
+    bank_req = INDEX_MAP.get("Nifty Bank", "NSE_INDEX|Nifty Bank")
+    sensex_req = "BSE_INDEX|SENSEX"
     
-    indices = {
-        "NIFTY 50": nifty_key,
-        "BANK NIFTY": bank_key,
-        "SENSEX": sensex_key
-    }
+    request_keys = [nifty_req, bank_req, sensex_req]
     
-    # Live Fetch
-    live_data = fetch_live_quotes(list(indices.values()))
+    # 2. Fetch Data
+    live_data = fetch_live_quotes(request_keys)
     
     if SHOW_DEBUG:
         with st.expander("🔍 Raw Live Data", expanded=True):
             st.write(live_data)
 
+    # 3. Fuzzy Match Data (The Fix)
+    # Instead of looking for exact key, we look for the item inside the response
+    def find_data(search_term):
+        ltp, pct = 0.0, 0.0
+        if not live_data: return ltp, pct
+        
+        # Iterate through everything returned to find a match
+        found_obj = None
+        
+        # Method A: Direct Key Match
+        if search_term in live_data:
+            found_obj = live_data[search_term]
+        
+        # Method B: Search Keys (Fuzzy)
+        if not found_obj:
+            for k, v in live_data.items():
+                if search_term.split("|")[-1] in str(k): # Check "Nifty 50" inside "NSE_INDEX|Nifty 50"
+                    found_obj = v
+                    break
+        
+        if found_obj:
+            ltp, close = safe_extract_price(found_obj)
+            if close > 0:
+                pct = ((ltp - close)/close)*100
+        
+        return ltp, pct
+
+    n_ltp, n_pct = find_data(nifty_req)
+    b_ltp, b_pct = find_data(bank_req)
+    s_ltp, s_pct = find_data(sensex_req)
+
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
-    
-    # --- THE FIX: HANDLE DICTIONARY VS OBJECT ---
-    def get_val(key):
-        if live_data and key in live_data:
-            q = live_data[key]
-            
-            # 1. Try Dictionary Access (Primary)
-            try:
-                if isinstance(q, dict):
-                    ltp = float(q.get('last_price', 0))
-                    ohlc = q.get('ohlc', {})
-                    close = float(ohlc.get('close', 0))
-                    if close == 0: close = float(ohlc.get('open', 0))
-                else:
-                    # 2. Try Object Access (Fallback)
-                    ltp = float(q.last_price)
-                    close = float(q.ohlc.close)
-                    if close == 0: close = float(q.ohlc.open)
-                
-                if close > 0:
-                    pct = ((ltp - close)/close)*100
-                    return ltp, pct
-            except Exception as e:
-                # if SHOW_DEBUG: st.error(f"Parse Error {key}: {e}")
-                pass
-                
-        return 0.0, 0.0
-
-    n_ltp, n_pct = get_val(indices["NIFTY 50"])
-    b_ltp, b_pct = get_val(indices["BANK NIFTY"])
-    s_ltp, s_pct = get_val(indices["SENSEX"])
-
     with c1: st.metric("NIFTY 50", f"{n_ltp:,.2f}", f"{n_pct:.2f}%")
     with c2: st.metric("BANK NIFTY", f"{b_ltp:,.2f}", f"{b_pct:.2f}%")
     with c3: st.metric("SENSEX", f"{s_ltp:,.2f}", f"{s_pct:.2f}%")
@@ -200,39 +215,34 @@ def scanner():
         if clean in SYMBOL_MAP:
             k = SYMBOL_MAP[clean]
             valid_keys.append(k)
-            key_to_name[k] = clean
+            key_to_name[k] = clean 
             
     live_quotes = fetch_live_quotes(valid_keys)
     
     for i, key in enumerate(valid_keys):
         try:
+            # 1. LIVE PRICE
             ltp = 0.0
-            
-            # Same Fix for Scanner Logic
             if key in live_quotes:
-                q = live_quotes[key]
-                try:
-                    if isinstance(q, dict):
-                        ltp = float(q.get('last_price', 0))
-                    else:
-                        ltp = float(q.last_price)
-                except: pass
+                ltp, _ = safe_extract_price(live_quotes[key])
             
+            # 2. HISTORY
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
+            # Fallback
             if ltp == 0: ltp = df.iloc[-1]['close']
             
+            # Indicators
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
             df['EMA'] = ta.ema(df['close'], 5)
             
             last = df.iloc[-1]
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
-            symbol_name = key_to_name.get(key, "Unknown")
             
             row = {
-                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{symbol_name}",
+                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{key_to_name[key]}",
                 "LTP": ltp, "Mom %": mom_pct,
                 "RSI": round(last['RSI'], 2), "ADX": round(last['ADX'], 2)
             }
