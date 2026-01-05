@@ -5,127 +5,106 @@ import pandas_ta as ta
 import pytz
 from datetime import datetime, timedelta
 import time
+import requests
+import io
 
 # --- 1. APP CONFIGURATION ---
-st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
+st.set_page_config(page_title="Absa's F&O OI Scanner", layout="wide")
 
-# --- 2. DHAN API CREDENTIALS (FROM SECRETS) ---
+# --- 2. CREDENTIALS ---
 dhan = None
 try:
-    # Fetching credentials securely from secrets.toml
     client_id = st.secrets["DHAN_CLIENT_ID"]
     access_token = st.secrets["DHAN_ACCESS_TOKEN"]
-    
-    # Initialize DhanHQ
     dhan = dhanhq(client_id, access_token)
 except Exception as e:
-    st.error(f"⚠️ API Error: Could not load credentials from secrets.toml. Details: {e}")
+    st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 3. GLOBAL SYMBOL LIST (MAPPED FOR DHAN) ---
-@st.cache_data(ttl=86400) # Cache for 1 day
-def get_dhan_master_list():
+# --- 3. SMART MASTER LIST (F&O FUTURES ONLY) ---
+@st.cache_data(ttl=3600*4) # Cache for 4 hours
+def get_fno_master_map():
+    """
+    Downloads Dhan Master List and filters for CURRENT MONTH FUTURES only.
+    This automatically ensures we only scan F&O stocks.
+    """
+    symbol_map = {}
     try:
         url = "https://images.dhan.co/api-data/api-scrip-master.csv"
-        df = pd.read_csv(url)
-        # Filter for NSE Equity (EQ)
-        df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'EQUITY')]
-        return df[['SEM_SMST_SECURITY_ID', 'SEM_TRADING_SYMBOL']]
-    except Exception as e:
-        st.error(f"Error fetching Master List: {e}")
-        return pd.DataFrame()
-
-# Helper to find Security ID
-def get_security_id(symbol, master_df):
-    clean_sym = symbol.replace('.NS', '')
-    row = master_df[master_df['SEM_TRADING_SYMBOL'] == clean_sym]
-    if not row.empty:
-        return row.iloc[0]['SEM_SMST_SECURITY_ID']
-    return None
-
-# User's Symbol List
-FNO_SYMBOLS_RAW = [
-    'ABFRL.NS', 'ADANIENT.NS', 'ADANIPORTS.NS', 'AXISBANK.NS', 'BANDHANBNK.NS', 
-    'BANKBARODA.NS', 'BHARTIARTL.NS', 'BPCL.NS', 'BRITANNIA.NS', 'CIPLA.NS', 
-    'COALINDIA.NS', 'DIVISLAB.NS', 'DRREDDY.NS', 'EICHERMOT.NS', 'GRASIM.NS', 
-    'HCLTECH.NS', 'HDFCBANK.NS', 'HDFCLIFE.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS', 
-    'HINDUNILVR.NS', 'ICICIBANK.NS', 'INDUSINDBK.NS', 'INFY.NS', 'ITC.NS', 
-    'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LT.NS', 'M&M.NS', 'MARUTI.NS', 'NESTLEIND.NS', 
-    'NTPC.NS', 'ONGC.NS', 'POWERGRID.NS', 'RELIANCE.NS', 'SBILIFE.NS', 'SBIN.NS', 
-    'SUNPHARMA.NS', 'TATACONSUM.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TCS.NS', 
-    'TECHM.NS', 'TITAN.NS', 'ULTRACEMCO.NS', 'UPL.NS', 'WIPRO.NS'
-]
-
-# --- 4. AUTHENTICATION (Web CSV Method) ---
-def authenticate_user(user_in, pw_in):
-    try:
-        csv_url = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
-        df = pd.read_csv(csv_url)
-        df['username'] = df['username'].astype(str).str.strip().str.lower()
-        df['password'] = df['password'].astype(str).str.strip()
+        s = requests.get(url).content
+        df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         
-        match = df[(df['username'] == str(user_in).strip().lower()) & 
-                   (df['password'] == str(pw_in).strip())]
-        return not match.empty
+        # 1. Filter for NSE Futures (FUTSTK)
+        # We ignore Indices (FUTIDX) here to focus on Stocks, or include if needed
+        fno_df = df[
+            (df['SEM_EXM_EXCH_ID'] == 'NSE') & 
+            (df['SEM_INSTRUMENT_NAME'] == 'FUTSTK')
+        ].copy() # Copy to avoid SettingWithCopyWarning
+        
+        # 2. Find Current Expiry (Nearest Future Date)
+        # Convert expiry to datetime
+        fno_df['SEM_EXPIRY_DATE'] = pd.to_datetime(fno_df['SEM_EXPIRY_DATE'], errors='coerce')
+        today = pd.Timestamp.now().normalize()
+        
+        # Filter only future expiries
+        valid_futures = fno_df[fno_df['SEM_EXPIRY_DATE'] >= today]
+        
+        # Sort by Symbol and Date, then pick the first one (Nearest Expiry)
+        valid_futures = valid_futures.sort_values(by=['SEM_TRADING_SYMBOL', 'SEM_EXPIRY_DATE'])
+        current_futures = valid_futures.drop_duplicates(subset=['SEM_TRADING_SYMBOL'], keep='first')
+        
+        # 3. Create Map: { 'RELIANCE': {'id': '12345', 'name': 'RELIANCE-JAN-2026-FUT'} }
+        for _, row in current_futures.iterrows():
+            # Clean symbol name just in case
+            base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0] 
+            symbol_map[base_sym] = {
+                'id': str(row['SEM_SMST_SECURITY_ID']),
+                'name': row['SEM_CUSTOM_SYMBOL']
+            }
+            
     except Exception as e:
-        st.error(f"Connection Error: {e}")
-        return False
+        st.error(f"Master List Error: {e}")
+    
+    return symbol_map
 
-# --- 5. LOGIN GATE ---
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
+# Load Map
+with st.spinner("Syncing F&O Futures List..."):
+    FNO_MAP = get_fno_master_map()
 
-if not st.session_state["authenticated"]:
-    st.title("🔐 Absa's F&O Pro Login")
-    with st.form("login_form"):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
-        if st.form_submit_button("Log In"):
-            if authenticate_user(u, p):
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Invalid credentials or Connection Failed.")
-    st.stop()
+# --- 4. OI ANALYSIS LOGIC ---
+def get_oi_interpretation(price_chg_pct, oi_chg_pct):
+    if price_chg_pct > 0 and oi_chg_pct > 0:
+        return "Long Buildup 🟢" # Bullish
+    elif price_chg_pct < 0 and oi_chg_pct > 0:
+        return "Short Buildup 🔴" # Bearish
+    elif price_chg_pct < 0 and oi_chg_pct < 0:
+        return "Long Unwinding ⚠️" # Weakness
+    elif price_chg_pct > 0 and oi_chg_pct < 0:
+        return "Short Covering 🚀" # Explosive Up
+    return "Neutral ⚪"
 
-# --- 6. MAIN APPLICATION ---
-st.title("🚀 Absa's Live F&O Screener Pro (DhanHQ)")
-if st.sidebar.button("Log out"):
-    st.session_state["authenticated"] = False
-    st.rerun()
-
-# Load Master List
-master_list = get_dhan_master_list()
-if master_list.empty:
-    st.error("Could not load Scrip Master. Check internet connection.")
-    st.stop()
-
-def get_sentiment(p_chg, oi_chg):
-    if p_chg > 0 and oi_chg > 0: return "Long Buildup 🚀"
-    if p_chg < 0 and oi_chg > 0: return "Short Buildup 📉"
-    if p_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
-    if p_chg > 0 and oi_chg < 0: return "Short Covering 💨"
-    return "Neutral"
-
-# --- HELPER: FETCH INTRADAY DATA FROM DHAN ---
-def fetch_dhan_data(security_id):
-    """Fetches intraday data for the last 5 days"""
+# --- 5. DATA FETCHING ---
+def fetch_futures_data(security_id):
+    """Fetches intraday data for the Futures Contract (Includes OI)"""
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         
-        # Dhan Interval Map: 1 (1min), 5, 15, 25, 60
+        # Fetch 15-minute candles for the FUTURE contract
+        # Dhan returns OI in the 'oi' field for Futures
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
-            exchange_segment="NSE_EQ", 
-            instrument_type="EQUITY",
+            exchange_segment="NSE_FNO",  # Critical: Use FNO segment
+            instrument_type="FUTSTK",
             from_date=from_date,
             to_date=to_date,
-            interval=60  # 1 Hour interval
+            interval=15  # 15 Minute Interval
         )
         
         if res['status'] == 'success':
             data = res['data']
+            if not data: return pd.DataFrame()
+            
             df = pd.DataFrame(data)
             df.rename(columns={
                 'start_Time': 'datetime', 
@@ -133,146 +112,129 @@ def fetch_dhan_data(security_id):
                 'high': 'High', 
                 'low': 'Low', 
                 'close': 'Close',
-                'volume': 'Volume'
+                'volume': 'Volume',
+                'oi': 'OI' # Capture Open Interest
             }, inplace=True)
             return df
-        else:
-            return pd.DataFrame()
             
-    except Exception as e:
-        return pd.DataFrame()
+    except Exception: pass
+    return pd.DataFrame()
 
-# --- HELPER: MARKET DASHBOARD ---
-def fetch_market_dashboard():
-    # Nifty 50 ID: 13, Bank Nifty ID: 25
-    indices = {"NIFTY 50": "13", "BANK NIFTY": "25"} 
-    
-    col1, col2, col3 = st.columns([1, 1, 2])
-    data_display = {}
-    
-    for name, sec_id in indices.items():
-        try:
-            to_date = datetime.now().strftime('%Y-%m-%d')
-            # Using interval 1 to get latest minute candle for LTP
-            res = dhan.intraday_minute_data(sec_id, 'IDX_I', 'INDEX', to_date, to_date, 1)
-            
-            if res['status'] == 'success' and len(res['data']['close']) > 0:
-                ltp = res['data']['close'][-1]
-                prev = res['data']['open'][0] 
-                chg = ltp - prev
-                pct = (chg / prev) * 100
-                data_display[name] = {"ltp": ltp, "chg": chg, "pct": pct}
-            else:
-                data_display[name] = {"ltp": 0, "chg": 0, "pct": 0}
-        except:
-            data_display[name] = {"ltp": 0, "chg": 0, "pct": 0}
-
-    # Render Metrics
-    with col1:
-        nifty = data_display.get("NIFTY 50", {"ltp":0, "chg":0, "pct":0})
-        st.metric(label="NIFTY 50", value=f"{nifty['ltp']:,.2f}", delta=f"{nifty['chg']:.2f} ({nifty['pct']:.2f}%)")
-    
-    with col2:
-        bank = data_display.get("BANK NIFTY", {"ltp":0, "chg":0, "pct":0})
-        st.metric(label="BANK NIFTY", value=f"{bank['ltp']:,.2f}", delta=f"{bank['chg']:.2f} ({bank['pct']:.2f}%)")
-        
-    with col3:
-        bias, color = "SIDEWAYS ↔️", "gray"
-        if nifty['pct'] > 0.25: bias, color = "BULLISH 🚀", "green"
-        elif nifty['pct'] < -0.25: bias, color = "BEARISH 📉", "red"
-            
-        st.markdown(f"""
-            <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
-                <h3 style="margin:0; color: {color};">Market Bias: {bias}</h3>
-            </div>
-        """, unsafe_allow_html=True)
-
+# --- 6. MAIN SCANNER ---
 @st.fragment(run_every=180)
-def refreshable_data_tables():
-    fetch_market_dashboard()
-    st.markdown("---")
+def scanner():
+    st.subheader("📊 Live F&O Sentiment Scanner (Price + OI)")
     
-    bullish, bearish = [], []
-    progress_bar = st.progress(0, text="Fetching Live Data from Dhan...")
+    # List of Symbols to Scan (You can expand this list)
+    # The scanner will AUTO-FILTER this list to only valid F&O stocks found in FNO_MAP
+    RAW_SYMBOLS = [
+        'RELIANCE', 'HDFCBANK', 'INFY', 'ICICIBANK', 'TCS', 'SBIN', 'KOTAKBANK', 'LICI', 'AXISBANK', 
+        'ITC', 'BHARTIARTL', 'LT', 'BAJFINANCE', 'MARUTI', 'HCLTECH', 'TITAN', 'SUNPHARMA', 
+        'ULTRACEMCO', 'TATAMOTORS', 'NTPC', 'POWERGRID', 'M&M', 'TATASTEEL', 'JSWSTEEL', 
+        'ADANIENT', 'HINDUNILVR', 'COALINDIA', 'GRASIM', 'ONGC', 'ADANIPORTS', 'BAJAJFINSV', 
+        'WIPRO', 'TECHM', 'HINDALCO', 'CIPLA', 'APOLLOHOSP', 'DRREDDY', 'EICHERMOT', 'DIVISLAB', 
+        'BRITANNIA', 'HEROMOTOCO', 'SBILIFE', 'TATACONSUM', 'BPCL', 'ASIANPAINT', 'NESTLEIND', 'INDUSINDBK'
+    ]
     
-    for i, sym in enumerate(FNO_SYMBOLS_RAW):
+    results = []
+    progress_bar = st.progress(0, "Analyzing Futures Data...")
+    
+    for i, sym in enumerate(RAW_SYMBOLS):
         try:
-            sec_id = get_security_id(sym, master_list)
-            if not sec_id: continue
-
-            df = fetch_dhan_data(sec_id)
+            # 1. F&O FILTER: Check if symbol exists in our Futures Map
+            if sym not in FNO_MAP:
+                # This automatically skips Non-F&O stocks
+                continue
+                
+            futa_data = FNO_MAP[sym]
+            sec_id = futa_data['id']
+            contract_name = futa_data['name']
+            
+            # 2. Fetch Futures Data (Contains OI)
+            df = fetch_futures_data(sec_id)
             
             if not df.empty and len(df) > 20:
-                # Indicators
+                # 3. Technicals
                 df['RSI'] = ta.rsi(df['Close'], length=14)
-                adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-                df['EMA_5'] = ta.ema(df['Close'], length=5)
+                df['EMA'] = ta.ema(df['Close'], length=5)
                 
-                ltp = df['Close'].iloc[-1]
-                ema_5 = df['EMA_5'].iloc[-1]
-                curr_rsi = df['RSI'].iloc[-1]
-                curr_adx = adx_df['ADX_14'].iloc[-1]
+                curr = df.iloc[-1]
+                prev = df.iloc[-2]
                 
-                momentum_pct = round(((ltp - ema_5) / ema_5) * 100, 2)
-                prev_close = df['Close'].iloc[-2] 
-                p_change = round(((ltp - prev_close) / prev_close) * 100, 2)
+                ltp = curr['Close']
+                curr_oi = curr['OI']
+                prev_oi = prev['OI']
                 
-                clean_sym = sym.replace(".NS", "")
-                tv_url = f"https://in.tradingview.com/chart/?symbol=NSE:{clean_sym}"
+                # 4. Calculations
+                # Price Change % (Candle to Candle)
+                price_chg_pct = round(((curr['Close'] - prev['Close']) / prev['Close']) * 100, 2)
                 
-                oi_chg = 1 
-                sentiment = get_sentiment(p_change, oi_chg)
+                # OI Change %
+                oi_chg_pct = 0.0
+                if prev_oi > 0:
+                    oi_chg_pct = round(((curr_oi - prev_oi) / prev_oi) * 100, 2)
                 
-                row = {
-                    "Symbol": tv_url,
-                    "LTP": round(ltp, 2),
-                    "Mom %": momentum_pct,
-                    "Chg %": p_change,
-                    "RSI": round(curr_rsi, 1),
-                    "ADX": round(curr_adx, 1),
-                    "Sentiment": sentiment
-                }
-
-                if p_change > 0.5 and curr_rsi > 60 and curr_adx > 20:
-                    bullish.append(row)
-                elif p_change < -0.5 and curr_rsi < 45 and curr_adx > 20:
-                    bearish.append(row)
-            
-            progress_bar.progress((i + 1) / len(FNO_SYMBOLS_RAW))
-            time.sleep(0.1) 
-            
-        except Exception:
-            continue
-            
+                # Momentum (Distance from EMA)
+                ema_val = curr['EMA']
+                mom_pct = round(((ltp - ema_val) / ema_val) * 100, 2)
+                
+                # 5. Interpretation
+                nature = get_oi_interpretation(price_chg_pct, oi_chg_pct)
+                
+                results.append({
+                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
+                    "Contract": contract_name,
+                    "LTP": ltp,
+                    "Price Chg%": price_chg_pct,
+                    "OI Chg%": oi_chg_pct,
+                    "RSI": round(curr['RSI'], 1),
+                    "Analysis": nature,
+                    "Mom %": mom_pct # Hidden sort key
+                })
+                
+        except Exception: pass
+        
+        # Polite delay
+        time.sleep(0.1)
+        progress_bar.progress((i + 1) / len(RAW_SYMBOLS))
+        
     progress_bar.empty()
     
-    column_config = {
-        "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)")
-    }
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.success("🟢 ACTIVE BULLS")
-        if bullish:
-            st.dataframe(
-                pd.DataFrame(bullish).sort_values(by="Mom %", ascending=False).head(10), 
-                use_container_width=True, hide_index=True, column_config=column_config
-            )
-        else:
-            st.info("No bullish breakouts detected.")
+    if results:
+        df_res = pd.DataFrame(results)
+        
+        # Configuration for nicer table
+        col_config = {
+            "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
+            "LTP": st.column_config.NumberColumn("Price", format="₹%.2f"),
+            "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
+            "Price Chg%": st.column_config.NumberColumn("Price Chg%", format="%.2f%%"),
+        }
+        
+        # Split into Bullish / Bearish based on Analysis
+        st.write("### 🚀 Movers & Shakers (Futures)")
+        
+        # Show specific "Short Covering" (High conviction upside)
+        short_cov = df_res[df_res['Analysis'].str.contains("Short Covering")]
+        if not short_cov.empty:
+            st.success(f"🔥 **Short Covering Detected** ({len(short_cov)} stocks)")
+            st.dataframe(short_cov, use_container_width=True, hide_index=True, column_config=col_config)
 
-    with col2:
-        st.error("🔴 ACTIVE BEARS")
-        if bearish:
-            st.dataframe(
-                pd.DataFrame(bearish).sort_values(by="Mom %", ascending=True).head(10), 
-                use_container_width=True, hide_index=True, column_config=column_config
-            )
-        else:
-            st.info("No bearish breakdowns detected.")
+        # Show specific "Long Buildup"
+        long_build = df_res[df_res['Analysis'].str.contains("Long Buildup")]
+        if not long_build.empty:
+            st.info(f"🟢 **Long Buildup** ({len(long_build)} stocks)")
+            st.dataframe(long_build, use_container_width=True, hide_index=True, column_config=col_config)
 
-    ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
-    st.write(f"🕒 **Last Data Sync:** {ist_time} IST (Auto-refreshing in 3 mins)")
-    st.markdown("<div style='text-align: center; color: grey; padding-top: 20px;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
+        # Show Bearish
+        bearish_df = df_res[df_res['Analysis'].str.contains("Short Buildup|Long Unwinding")]
+        if not bearish_df.empty:
+            st.error(f"🔴 **Bearish Pressure** ({len(bearish_df)} stocks)")
+            st.dataframe(bearish_df, use_container_width=True, hide_index=True, column_config=col_config)
+            
+    else:
+        st.warning("No data returned. Market might be closed or API connection failed.")
+        
+    st.markdown(f"<div style='text-align:right; color:grey;'>Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}</div>", unsafe_allow_html=True)
 
-refreshable_data_tables()
+scanner()
