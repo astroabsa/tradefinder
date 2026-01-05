@@ -293,6 +293,7 @@ def refreshable_scanner():
                 mom_pct = round(((ltp - df['EMA_5'].iloc[-1]) / df['EMA_5'].iloc[-1]) * 100, 2)
                 price_chg = round(((ltp - prev['Close']) / prev['Close']) * 100, 2)
                 
+                # OI Logic
                 oi_chg_pct = 0.0
                 if prev['OI'] > 0:
                     oi_chg_pct = round(((curr['OI'] - prev['OI']) / prev['OI']) * 100, 2)
@@ -359,9 +360,14 @@ def refreshable_scanner():
     # Footer
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
     st.write(f"🕒 **Last Data Sync:** {ist_time} IST")
-    st.markdown("<div style='text-align: center; color: grey; padding-top: 20px;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
+    st.markdown("""
+        <div style='text-align: center; color: grey; padding-top: 20px;'>
+            Powered by : i-Tech World
+        </div>
+    """, unsafe_allow_html=True)
 
-# --- 10. EXECUTION ---
+# --- 10. MAIN APP EXECUTION ---
 if dhan:
+    # These two functions now run INDEPENDENTLY at their own speeds
     refreshable_dashboard() 
     refreshable_scanner()
