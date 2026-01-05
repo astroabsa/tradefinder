@@ -57,19 +57,23 @@ except Exception as e:
     st.error(f"Connection Failed: {e}")
     st.stop()
 
-# --- 4. SMART MASTER LIST (Auto-Fetch IDs) ---
-@st.cache_data(ttl=3600*24) # Cache for 24 hours
+# --- 4. SMART MASTER LIST (FIXED URL) ---
+@st.cache_data(ttl=3600*24)
 def get_dhan_master_map():
     """Downloads Dhan's Scrip Master to map Symbols -> Security IDs"""
     symbol_map = {}
     index_map = {}
     try:
-        # Dhan Scrip Master URL
-        url = "https://images.dhan.co/api/csv/scrip_master.csv"
+        # FIX: Updated to correct v2 API URL
+        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
         s = requests.get(url).content
         df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         
+        # DEBUG: Show columns if key error persists
+        # st.write("Debug Columns:", df.columns.tolist())
+        
         # Filter for NSE Equity and Indices
+        # 'SEM_EXM_EXCH_ID': 'NSE', 'SEM_INSTRUMENT_NAME': 'EQUITY'
         eq_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'EQUITY')]
         idx_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'INDEX')]
         
@@ -79,6 +83,9 @@ def get_dhan_master_map():
         
     except Exception as e:
         st.error(f"Master List Error: {e}")
+        # If error, show what columns we actually got
+        try: st.write("Columns found:", df.columns.tolist())
+        except: pass
     
     return symbol_map, index_map
 
@@ -89,14 +96,11 @@ with st.spinner("Downloading Scrip Master..."):
 def fetch_15min_data(security_id, exchange_segment='NSE_EQ'):
     """
     Fetches 15-min candles using Dhan Historical API.
-    Used for both Technicals AND 'Live' Price (last close).
     """
     try:
-        # Dhan requires dates in YYYY-MM-DD
         to_d = datetime.now().strftime("%Y-%m-%d")
         from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
         
-        # Fetch Data
         res = dhan.historical_minute_charts(
             symbol=str(security_id),
             exchange_segment=exchange_segment,
@@ -104,13 +108,12 @@ def fetch_15min_data(security_id, exchange_segment='NSE_EQ'):
             expiry_code=0,
             from_date=from_d,
             to_date=to_d,
-            interval=15 # 15 Minute Interval
+            interval=15 
         )
         
         if res['status'] == 'success':
             data = res['data']
-            # Convert Dhan's list-of-lists to DataFrame
-            # Dhan format: start_Time, open, high, low, close, volume, oi
+            # Convert to DF
             df = pd.DataFrame({
                 'timestamp': data['start_Time'],
                 'open': data['open'],
@@ -118,51 +121,32 @@ def fetch_15min_data(security_id, exchange_segment='NSE_EQ'):
                 'low': data['low'],
                 'close': data['close'],
                 'volume': data['volume']
-                # 'oi': data.get('oi', []) # OI might be empty for Equity
             })
-            
-            # Convert timestamp (Dhan uses custom integer format sometimes, standardizing it)
-            # Actually Dhan returns "start_Time" as list of epochs usually.
-            # Let's trust pandas to handle standard formats or just take the last one.
             return df
             
     except Exception as e:
-        # st.error(f"Data Error: {e}") 
         pass
     return None
-
-def get_oi_analysis(price_change_pct, oi_change_pct):
-    if price_change_pct > 0 and oi_change_pct > 0: return "Long Buildup 🟢"
-    elif price_change_pct < 0 and oi_change_pct > 0: return "Short Buildup 🔴"
-    elif price_change_pct < 0 and oi_change_pct < 0: return "Long Unwinding ⚠️"
-    elif price_change_pct > 0 and oi_change_pct < 0: return "Short Covering ⚡"
-    else: return "Neutral ⚪"
 
 # --- 6. DASHBOARD (Indices) ---
 @st.fragment(run_every=60)
 def market_dashboard():
-    # Helper to get index data
     def get_index_val(name, dhan_symbol):
         if dhan_symbol in INDEX_MAP:
             sec_id = INDEX_MAP[dhan_symbol]
-            # Indices are 'IDX_I' segment in Dhan usually, or NSE_INDICES
-            # Using 'NSE_EQ' often works for fetching index OHLC too if mapped correctly
-            # But specifically for Dhan, Index Historical is often exchange_segment='IDX_I'
+            # Indices are usually 'IDX_I'
             df = fetch_15min_data(sec_id, exchange_segment='IDX_I') 
             
             if df is not None and not df.empty:
                 ltp = df.iloc[-1]['close']
-                # Calc % Change from Day Open (Approx using first candle of today)
-                # For simplicity in this snippet, using prev candle close
                 prev = df.iloc[-2]['close']
                 pct = ((ltp - prev)/prev)*100
                 return ltp, pct
         return 0.0, 0.0
 
-    # Nifty 50 and Bank Nifty
     n_ltp, n_pct = get_index_val("NIFTY", "Nifty 50")
     b_ltp, b_pct = get_index_val("BANKNIFTY", "Nifty Bank")
-    s_ltp, s_pct = get_index_val("FINNIFTY", "Nifty Fin Service") # Example 3rd index
+    s_ltp, s_pct = get_index_val("FINNIFTY", "Nifty Fin Service") 
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     with c1: st.metric("NIFTY 50", f"{n_ltp:,.2f}", f"{n_pct:.2f}%")
@@ -181,7 +165,6 @@ st.markdown("---")
 # --- 7. SCANNER (Stocks) ---
 @st.fragment(run_every=60)
 def scanner():
-    # Stocks List
     target_stocks = [
         'RELIANCE', 'TCS', 'HDFCBANK', 'ICICIBANK', 'SBIN', 'INFY', 'ITC', 
         'BHARTIARTL', 'LT', 'AXISBANK', 'KOTAKBANK', 'ULTRACEMCO', 'BAJFINANCE',
@@ -193,34 +176,29 @@ def scanner():
     
     for i, symbol in enumerate(target_stocks):
         try:
-            # 1. Get Security ID
             if symbol not in SYMBOL_MAP:
                 continue
             sec_id = SYMBOL_MAP[symbol]
             
-            # 2. Fetch Data (15 Min)
+            # 1. Fetch Data
             df = fetch_15min_data(sec_id)
             
             if df is not None and len(df) > 20:
-                # 3. Technicals
+                # 2. Technicals
                 df['RSI'] = ta.rsi(df['close'], 14)
                 df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
                 df['EMA'] = ta.ema(df['close'], 5)
                 
                 curr = df.iloc[-1]
-                prev = df.iloc[-2]
                 
                 ltp = curr['close']
                 curr_rsi = round(curr['RSI'], 2)
                 curr_adx = round(curr['ADX'], 2)
                 
-                # Momentum
                 ema_val = curr['EMA']
                 mom_pct = round(((ltp - ema_val) / ema_val) * 100, 2)
                 
-                # OI Logic (Placeholder for Equity - Equity has no OI usually)
-                # Note: To get real OI, we need to query the FUTURES segment ID.
-                # For this basic version, we stick to Equity Price Action.
+                # 3. Logic
                 nature = "Waiting"
                 if mom_pct > 0.1 and curr_rsi > 55: nature = "Bullish"
                 elif mom_pct < -0.1 and curr_rsi < 45: nature = "Bearish"
@@ -237,16 +215,13 @@ def scanner():
                 all_stocks.append(row)
                 
         except Exception as e:
-            # st.error(e)
             pass
             
-        # Update Bar
         bar.progress((i + 1) / len(target_stocks))
-        time.sleep(0.1) # Tiny sleep to be polite to Dhan API
+        time.sleep(0.1) 
     
     bar.empty()
     
-    # --- DISPLAY ---
     if all_stocks:
         df_all = pd.DataFrame(all_stocks)
         
