@@ -91,17 +91,29 @@ FNO_SYMBOLS = [
     'POWERGRID.NS', 'ULTRACEMCO.NS', 'WIPRO.NS', 'NESTLEIND.NS'
 ]
 
-# --- 5. CORE FUNCTIONS ---
-def fetch_live_quotes(keys_list):
+# --- 5. DATA FETCHING FUNCTIONS ---
+
+def fetch_live_ohlc(keys_list):
+    """Fetches OHLC Data (Good for Indices)"""
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        # Using OHLC endpoint (1d interval)
         response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
-        if response.status == 'success':
-            return response.data
+        if response.status == 'success': return response.data
     except Exception as e:
-        if SHOW_DEBUG: st.error(f"Live Quote Error: {e}")
+        if SHOW_DEBUG: st.error(f"OHLC API Error: {e}")
+    return {}
+
+def fetch_live_ltp(keys_list):
+    """Fetches ONLY Price (Faster/Lighter for Scanner)"""
+    if not keys_list: return {}
+    try:
+        keys_str = ",".join(keys_list)
+        # Use LTP Endpoint for stocks
+        response = quote_api.get_market_quote_ltp(symbol=keys_str, api_version='2.0')
+        if response.status == 'success': return response.data
+    except Exception as e:
+        if SHOW_DEBUG: st.error(f"LTP API Error: {e}")
     return {}
 
 def fetch_history(key):
@@ -120,53 +132,43 @@ def fetch_history(key):
     except: pass
     return None
 
-def extract_data_robust(response_data, target_key):
+# --- 6. DATA EXTRACTION HELPER ---
+def get_data_from_response(response_data, target_key, mode='OHLC'):
     """
-    Robustly extracts LTP and % Change.
-    Used by BOTH Dashboard and Scanner for consistency.
+    Safely extracts price from either OHLC or LTP response.
     """
-    ltp, pct = 0.0, 0.0
-    if not response_data: return ltp, pct
+    ltp, ref_price = 0.0, 0.0
+    if not response_data: return 0.0, 0.0
 
-    # 1. Fuzzy Match Key
+    # 1. Fuzzy Match
     data_item = None
     if target_key in response_data:
         data_item = response_data[target_key]
     else:
-        # Fallback: Search for matching token inside response keys
         target_part = target_key.split("|")[-1]
         for k, v in response_data.items():
             if target_part in str(k):
-                data_item = v
-                break
+                data_item = v; break
     
     if not data_item: return 0.0, 0.0
 
-    # 2. Extract Values
+    # 2. Extract
     try:
-        # Handle Dict
+        # Handle Dictionary vs Object
         if isinstance(data_item, dict):
             ltp = float(data_item.get('last_price', 0))
-            ohlc = data_item.get('ohlc', {})
-            open_price = float(ohlc.get('open', 0))
-            close_price = float(ohlc.get('close', 0))
-        # Handle Object
+            if mode == 'OHLC':
+                ohlc = data_item.get('ohlc', {})
+                ref_price = float(ohlc.get('open', 0)) # Use Open for Day Change
         else:
             ltp = float(data_item.last_price)
-            open_price = float(data_item.ohlc.open)
-            close_price = float(data_item.ohlc.close)
+            if mode == 'OHLC':
+                ref_price = float(data_item.ohlc.open)
+    except: pass
 
-        # 3. Calculate % Change (Using OPEN for accuracy)
-        ref_price = open_price if open_price > 0 else close_price
-        
-        if ref_price > 0:
-            pct = ((ltp - ref_price) / ref_price) * 100
-            
-    except Exception: pass
+    return ltp, ref_price
 
-    return ltp, pct
-
-# --- 6. DASHBOARD ---
+# --- 7. DASHBOARD ---
 @st.fragment(run_every=2)
 def market_dashboard():
     indices = {
@@ -175,17 +177,24 @@ def market_dashboard():
         "SENSEX": "BSE_INDEX|SENSEX"
     }
     
-    live_data = fetch_live_quotes(list(indices.values()))
+    # Use OHLC for Dashboard to get Open price
+    live_data = fetch_live_ohlc(list(indices.values()))
     
     if SHOW_DEBUG:
-        with st.expander("🔍 Raw Dashboard Data", expanded=True):
+        with st.expander("🔍 Raw Dashboard Data", expanded=False):
             st.write(live_data)
 
-    n_ltp, n_pct = extract_data_robust(live_data, indices["NIFTY 50"])
-    b_ltp, b_pct = extract_data_robust(live_data, indices["BANK NIFTY"])
-    s_ltp, s_pct = extract_data_robust(live_data, indices["SENSEX"])
-
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
+    
+    n_ltp, n_open = get_data_from_response(live_data, indices["NIFTY 50"], 'OHLC')
+    b_ltp, b_open = get_data_from_response(live_data, indices["BANK NIFTY"], 'OHLC')
+    s_ltp, s_open = get_data_from_response(live_data, indices["SENSEX"], 'OHLC')
+
+    # Calc % (LTP - Open / Open)
+    n_pct = ((n_ltp - n_open)/n_open)*100 if n_open > 0 else 0
+    b_pct = ((b_ltp - b_open)/b_open)*100 if b_open > 0 else 0
+    s_pct = ((s_ltp - s_open)/s_open)*100 if s_open > 0 else 0
+
     with c1: st.metric("NIFTY 50", f"{n_ltp:,.2f}", f"{n_pct:.2f}%")
     with c2: st.metric("BANK NIFTY", f"{b_ltp:,.2f}", f"{b_pct:.2f}%")
     with c3: st.metric("SENSEX", f"{s_ltp:,.2f}", f"{s_pct:.2f}%")
@@ -199,13 +208,12 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER ---
+# --- 8. SCANNER ---
 @st.fragment(run_every=180) 
 def scanner():
     bulls, bears = [], []
     bar = st.progress(0, "Scanning...")
     
-    # Prepare Keys
     valid_keys = []
     key_to_name = {}
     
@@ -216,22 +224,31 @@ def scanner():
             valid_keys.append(k)
             key_to_name[k] = clean
             
-    # Batch Fetch
-    live_quotes = fetch_live_quotes(valid_keys)
+    # Use LTP Endpoint for Scanner (Faster/Lighter)
+    live_quotes = fetch_live_ltp(valid_keys)
+    
+    if SHOW_DEBUG:
+        with st.expander("🔍 Raw Scanner Data (LTP)", expanded=True):
+            st.write(f"Requests Keys ({len(valid_keys)}): {valid_keys}")
+            st.write(live_quotes)
     
     for i, key in enumerate(valid_keys):
         try:
-            # 1. LIVE PRICE (Using the same robust helper!)
-            ltp, _ = extract_data_robust(live_quotes, key)
+            # 1. LIVE PRICE
+            # We use 'LTP' mode which only looks for last_price
+            ltp, _ = get_data_from_response(live_quotes, key, 'LTP')
             
-            # 2. HISTORY
+            # 2. HISTORY (Indicators)
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
-            # Fallback if live failed
-            if ltp == 0: ltp = df.iloc[-1]['close']
+            # FALLBACK: If Live LTP is 0, warn user or use history
+            is_live = True
+            if ltp == 0: 
+                ltp = df.iloc[-1]['close']
+                is_live = False
             
-            # 3. INDICATORS
+            # Indicators
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
             df['EMA'] = ta.ema(df['close'], 5)
@@ -239,10 +256,16 @@ def scanner():
             last = df.iloc[-1]
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
+            # Format Price (Add * if delayed)
+            display_price = f"₹{ltp:,.2f}"
+            if not is_live: display_price += " (Delayed)"
+
             row = {
                 "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{key_to_name[key]}",
-                "LTP": ltp, "Mom %": mom_pct,
-                "RSI": round(last['RSI'], 2), "ADX": round(last['ADX'], 2)
+                "LTP": display_price, 
+                "Mom %": mom_pct,
+                "RSI": round(last['RSI'], 2), 
+                "ADX": round(last['ADX'], 2)
             }
             
             if mom_pct > 0.5 and last['RSI'] > 60: bulls.append(row)
@@ -253,7 +276,7 @@ def scanner():
     
     bar.empty()
     
-    col_conf = {"Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"), "LTP": st.column_config.NumberColumn("Price", format="₹%.2f")}
+    col_conf = {"Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"), "LTP": st.column_config.TextColumn("Price")}
     
     c1, c2 = st.columns(2)
     with c1:
