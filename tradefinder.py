@@ -57,9 +57,9 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 5. SMART MASTER LIST (ROBUST MATCHING) ---
+# --- 5. SMART F&O MASTER LIST ---
 @st.cache_data(ttl=3600*4)
-def get_master_data_map():
+def get_fno_futures_map():
     fno_map = {}
     index_map = {}
     try:
@@ -67,14 +67,10 @@ def get_master_data_map():
         s = requests.get(url).content
         df = pd.read_csv(io.StringIO(s.decode('utf-8')))
         
-        # Standardize Symbols to Upper Case for matching
-        df['SEM_TRADING_SYMBOL'] = df['SEM_TRADING_SYMBOL'].str.upper().str.strip()
-        
-        # 1. Stocks Futures (For Scanner)
+        # 1. Stocks Futures
         stk_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTSTK')]
-        
-        # 2. Spot Indices (For Dashboard)
-        idx_df = df[df['SEM_INSTRUMENT_NAME'] == 'INDEX']
+        # 2. Index Futures (For Dashboard)
+        idx_df = df[(df['SEM_EXM_EXCH_ID'] == 'NSE') & (df['SEM_INSTRUMENT_NAME'] == 'FUTIDX')]
         
         # Helper to find nearest expiry
         def get_current_futures(dataframe):
@@ -90,26 +86,19 @@ def get_master_data_map():
             base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
             fno_map[base_sym] = {'id': str(row['SEM_SMST_SECURITY_ID']), 'name': row['SEM_CUSTOM_SYMBOL']}
             
-        # Process Spot Indices (Robust Search)
-        # NIFTY 50
-        nifty = idx_df[(idx_df['SEM_EXM_EXCH_ID'] == 'NSE') & (idx_df['SEM_TRADING_SYMBOL'] == 'NIFTY 50')]
-        if not nifty.empty: index_map['NIFTY'] = str(nifty.iloc[0]['SEM_SMST_SECURITY_ID'])
-        
-        # BANK NIFTY (Check standard names)
-        bank = idx_df[(idx_df['SEM_EXM_EXCH_ID'] == 'NSE') & (idx_df['SEM_TRADING_SYMBOL'].isin(['NIFTY BANK', 'BANKNIFTY']))]
-        if not bank.empty: index_map['BANKNIFTY'] = str(bank.iloc[0]['SEM_SMST_SECURITY_ID'])
-        
-        # SENSEX (BSE)
-        sensex = idx_df[(idx_df['SEM_EXM_EXCH_ID'] == 'BSE') & (idx_df['SEM_TRADING_SYMBOL'].str.contains('SENSEX'))]
-        if not sensex.empty: index_map['SENSEX'] = str(sensex.iloc[0]['SEM_SMST_SECURITY_ID'])
-
+        # Process Indices
+        curr_idx = get_current_futures(idx_df)
+        for _, row in curr_idx.iterrows():
+            base_sym = row['SEM_TRADING_SYMBOL'].split('-')[0]
+            index_map[base_sym] = str(row['SEM_SMST_SECURITY_ID'])
+            
     except Exception as e:
         st.error(f"Master List Error: {e}")
     
     return fno_map, index_map
 
-with st.spinner("Syncing Master List..."):
-    FNO_MAP, INDEX_MAP = get_master_data_map()
+with st.spinner("Syncing F&O List..."):
+    FNO_MAP, INDEX_MAP = get_fno_futures_map()
 
 # --- 6. DATA FETCHING ---
 def fetch_futures_data(security_id, interval=60):
@@ -120,7 +109,7 @@ def fetch_futures_data(security_id, interval=60):
         res = dhan.intraday_minute_data(
             security_id=str(security_id),
             exchange_segment="NSE_FNO", 
-            instrument_type="FUTSTK",
+            instrument_type="FUTSTK", # Default for Stocks
             from_date=from_date,
             to_date=to_date,
             interval=interval
@@ -144,92 +133,52 @@ def get_oi_analysis(price_chg, oi_chg):
     return "Neutral ⚪"
 
 
-# --- 8. DASHBOARD (FIXED: 3-DAY LOOKBACK) ---
+# --- 8. COMPONENT: DASHBOARD (Refreshes every 5 sec) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    indices_config = [
-        {"name": "NIFTY 50", "key": "NIFTY", "seg": "IDX_I"},
-        {"name": "BANK NIFTY", "key": "BANKNIFTY", "seg": "IDX_I"},
-        {"name": "SENSEX", "key": "SENSEX", "seg": "BSE_IDX"}
-    ]
+    indices = {
+        "NIFTY 50": INDEX_MAP.get("NIFTY", ""), 
+        "BANK NIFTY": INDEX_MAP.get("BANKNIFTY", "")
+    }
     
     data_display = {}
     
-    for item in indices_config:
-        key = item['key']
-        if key not in INDEX_MAP: continue
-        
-        sec_id = INDEX_MAP[key]
-        segment = item['seg']
-        
+    # Fetch Data for Indices
+    for name, sec_id in indices.items():
+        if not sec_id: continue
         try:
             to_date = datetime.now().strftime('%Y-%m-%d')
-            # Look back 3 days to ensure data exists (Handles Weekends/Mornings)
-            from_date = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
-            
             res = dhan.intraday_minute_data(
                 security_id=sec_id,
-                exchange_segment=segment,
-                instrument_type="INDEX",
-                from_date=from_date, 
+                exchange_segment="NSE_FNO",
+                instrument_type="FUTIDX",
+                from_date=to_date, 
                 to_date=to_date,
                 interval=1 
             )
             
             if res['status'] == 'success' and res['data'].get('close'):
-                # Take the VERY LAST candle (Latest Price)
                 ltp = res['data']['close'][-1]
-                
-                # For % Change:
-                # If market is open, use today's first candle.
-                # If market is closed/weekend, use prev day close vs last price.
-                # Simplified: Use the first candle of the *fetched range* or today's open if available.
-                
-                # Logic: Try to find today's open, else use series open
-                # In 1-min data, open[0] is the open of 3 days ago. We need today's open.
-                # Let's simplify: Use the last close vs close 1 day ago (approx).
-                
-                # Better Logic for Dashboard display:
-                open_price = res['data']['open'][0] 
-                # Ideally we want 'Yesterday Close' but Intraday API doesn't give that easily.
-                # We will use the start of the fetched period as reference for now to show *some* movement,
-                # or just LTP if 0.
-                
-                # Refined: Try to find the first candle of "Today".
-                times = res['data']['start_Time']
-                # Dhan times are integers/floats. 
-                # We will just use the last available candle for LTP.
-                
-                # To calculate a realistic % change for the dashboard,
-                # we ideally need the previous day's close. 
-                # Fallback: Compare Last Price vs Price 375 minutes ago (approx 1 day) or index 0.
-                prev_price = res['data']['close'][max(0, len(res['data']['close']) - 375)] 
-                
-                chg = ltp - prev_price
-                pct = (chg / prev_price) * 100
-                
-                data_display[item['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+                open_price = res['data']['open'][0]
+                chg = ltp - open_price
+                pct = (chg / open_price) * 100
+                data_display[name] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
-                data_display[item['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+                data_display[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
         except:
-            data_display[item['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            data_display[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
-    # Render
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
+    col1, col2, col3 = st.columns([1, 1, 2])
     
-    with c1:
+    with col1:
         n = data_display.get("NIFTY 50", {"ltp":0, "chg":0, "pct":0})
-        st.metric("NIFTY 50", f"{n['ltp']:,.2f}", f"{n['chg']:.2f} ({n['pct']:.2f}%)")
+        st.metric(label="NIFTY 50 (Fut)", value=f"{n['ltp']:,.2f}", delta=f"{n['chg']:.2f} ({n['pct']:.2f}%)")
     
-    with c2:
+    with col2:
         b = data_display.get("BANK NIFTY", {"ltp":0, "chg":0, "pct":0})
-        st.metric("BANK NIFTY", f"{b['ltp']:,.2f}", f"{b['chg']:.2f} ({b['pct']:.2f}%)")
-
-    with c3:
-        s = data_display.get("SENSEX", {"ltp":0, "chg":0, "pct":0})
-        st.metric("SENSEX", f"{s['ltp']:,.2f}", f"{s['chg']:.2f} ({s['pct']:.2f}%)")
+        st.metric(label="BANK NIFTY (Fut)", value=f"{b['ltp']:,.2f}", delta=f"{b['chg']:.2f} ({b['pct']:.2f}%)")
         
-    with c4:
+    with col3:
         n_pct = data_display.get("NIFTY 50", {}).get("pct", 0)
         bias = "SIDEWAYS ↔️"
         color = "gray"
@@ -238,12 +187,12 @@ def refreshable_dashboard():
             
         st.markdown(f"""
             <div style="text-align: center; padding: 10px; border: 1px solid {color}; border-radius: 10px;">
-                <h3 style="margin:0; color: {color};">Bias: {bias}</h3>
+                <h3 style="margin:0; color: {color};">Market Bias: {bias}</h3>
             </div>
         """, unsafe_allow_html=True)
 
 
-# --- 9. SCANNER TABLE (Refreshes every 180 sec) ---
+# --- 9. COMPONENT: SCANNER TABLE (Refreshes every 180 sec) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
@@ -258,6 +207,7 @@ def refreshable_scanner():
             futa_data = FNO_MAP[sym]
             sec_id = futa_data['id']
             
+            # Fetch Data (1H Candles)
             df = fetch_futures_data(sec_id, interval=60)
             
             if not df.empty and len(df) > 20:
@@ -324,6 +274,7 @@ def refreshable_scanner():
             st.dataframe(pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=col_config)
         else: st.info("No bearish setups found.")
 
+    # Footer
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
     st.write(f"🕒 **Last Data Sync:** {ist_time} IST")
     st.markdown("""
@@ -334,5 +285,6 @@ def refreshable_scanner():
 
 # --- 10. MAIN APP EXECUTION ---
 if dhan:
+    # These two functions now run INDEPENDENTLY at their own speeds
     refreshable_dashboard() 
     refreshable_scanner()
