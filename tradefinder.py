@@ -89,34 +89,31 @@ STOCKS = {
 
 def fetch_live_batch(keys_list, mode='FULL'):
     if not keys_list: return {}
-    
     combined_data = {}
     BATCH_SIZE = 10 
-    
     for i in range(0, len(keys_list), BATCH_SIZE):
         batch = keys_list[i:i+BATCH_SIZE]
         keys_str = ",".join(batch)
-        
         try:
             if mode == 'FULL':
                 response = quote_api.get_full_market_quote(symbol=keys_str, api_version='2.0')
             else:
                 response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
-                
             if response.status == 'success':
                 combined_data.update(response.data)
-                
         except Exception as e:
             if SHOW_DEBUG: st.warning(f"Batch Failed: {e}")
-            
     return combined_data
 
 def fetch_history(key):
     try:
         to_d = datetime.now().strftime("%Y-%m-%d")
-        from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
+        # Fetch fewer days for speed
+        from_d = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+        
+        # CHANGED: '30minute' -> '5minute' for faster signals
         res = history_api.get_historical_candle_data1(
-            instrument_key=key, interval='30minute', 
+            instrument_key=key, interval='5minute', 
             to_date=to_d, from_date=from_d, api_version='2.0'
         )
         if res.status == 'success' and res.data.candles:
@@ -128,54 +125,49 @@ def fetch_history(key):
     return None
 
 def extract_price_robust(response_data, target_key):
-    """
-    ULTRA-ROBUST EXTRACTION [The Fix]
-    Looks inside the data packet for the 'instrument_token' field.
-    """
+    """Robust extraction for LTP"""
     ltp, ref_price = 0.0, 0.0
     if not response_data: return 0.0, 0.0
 
-    # 1. Direct Match
+    # Deep Search for Instrument Token
     data_item = response_data.get(target_key)
-
-    # 2. Deep Search (If direct key fails)
     if not data_item:
         for k, v in response_data.items():
-            # Check if the data packet contains our target ISIN
             if isinstance(v, dict) and v.get('instrument_token') == target_key:
-                data_item = v
-                break
-            # Handle object case
+                data_item = v; break
             elif hasattr(v, 'instrument_token') and v.instrument_token == target_key:
-                data_item = v
-                break
+                data_item = v; break
 
     if not data_item: return 0.0, 0.0
 
-    # 3. Extract Values
     try:
-        # Dict Access
         if isinstance(data_item, dict):
             ltp = float(data_item.get('last_price', 0))
             ohlc = data_item.get('ohlc', {})
             ref_price = float(ohlc.get('open', 0))
-        # Object Access
         else:
             ltp = float(data_item.last_price)
             ref_price = float(data_item.ohlc.open)
     except: pass
-
     return ltp, ref_price
+
+def get_oi_analysis(price_change_pct, oi_change_pct):
+    """Determines Market Nature based on Price & OI"""
+    if price_change_pct > 0 and oi_change_pct > 0:
+        return "Long Buildup 🟢", "green"
+    elif price_change_pct < 0 and oi_change_pct > 0:
+        return "Short Buildup 🔴", "red"
+    elif price_change_pct < 0 and oi_change_pct < 0:
+        return "Long Unwinding ⚠️", "orange"
+    elif price_change_pct > 0 and oi_change_pct < 0:
+        return "Short Covering ⚡", "blue"
+    else:
+        return "Neutral ⚪", "gray"
 
 # --- 6. DASHBOARD (Indices) ---
 @st.fragment(run_every=2)
 def market_dashboard():
     live_data = fetch_live_batch(list(INDICES.values()), mode='OHLC')
-    
-    if SHOW_DEBUG:
-        with st.expander("🔍 Raw Dashboard Data", expanded=False):
-            st.write(live_data)
-
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
     n_ltp, n_open = extract_price_robust(live_data, INDICES["NIFTY 50"])
@@ -199,45 +191,58 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER (Stocks) ---
-@st.fragment(run_every=180) 
+# --- 7. SCANNER (Stocks - 5 Min Logic) ---
+@st.fragment(run_every=60) # Refresh every 60s for 5-min candles
 def scanner():
     bulls, bears = [], []
-    bar = st.progress(0, "Scanning...")
+    bar = st.progress(0, "Scanning (5-Min TF)...")
     
     valid_keys = list(STOCKS.values())
-    
-    # 1. BATCH FETCH (FULL MODE)
     live_quotes = fetch_live_batch(valid_keys, mode='FULL')
     
     if SHOW_DEBUG:
-        with st.expander("🔍 Scanner Debug (Live Quotes)", expanded=True):
-            st.write(f"Fetched {len(live_quotes)} items from API.")
+        with st.expander("🔍 Scanner Debug", expanded=True):
             st.write(live_quotes)
     
     for i, (name, key) in enumerate(STOCKS.items()):
         try:
-            # 2. LIVE PRICE (Using Deep Search)
+            # 1. LIVE PRICE
             ltp, _ = extract_price_robust(live_quotes, key)
             
-            # 3. HISTORY
+            # 2. HISTORY (5-Minute Candles)
             df = fetch_history(key)
-            if df is None or len(df) < 30: continue
+            if df is None or len(df) < 20: continue
             
-            # Fallback Check
+            # Fallback
             is_live = True
             if ltp == 0: 
                 ltp = df.iloc[-1]['close']
                 is_live = False
             
-            # 4. CALC INDICATORS
+            # 3. TECHNICALS (RSI & ADX on 5-Min)
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
-            df['EMA'] = ta.ema(df['close'], 5)
+            df['EMA'] = ta.ema(df['close'], 5) # 5-Period EMA
             
             last = df.iloc[-1]
+            prev = df.iloc[-2]
+            
+            curr_rsi = round(last['RSI'], 2)
+            curr_adx = round(last['ADX'], 2)
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
+            # 4. OPEN INTEREST ANALYSIS
+            # Calculate % Change in OI from previous candle
+            curr_oi = last['oi']
+            prev_oi = prev['oi']
+            oi_change_pct = 0.0
+            if prev_oi > 0:
+                oi_change_pct = ((curr_oi - prev_oi) / prev_oi) * 100
+                
+            # Determine Nature (Bullish/Bearish based on OI)
+            price_change_candle = ((last['close'] - prev['close']) / prev['close']) * 100
+            nature, nature_color = get_oi_analysis(price_change_candle, oi_change_pct)
+
             display_price = f"₹{ltp:,.2f}"
             if not is_live: display_price += " (Delayed)"
 
@@ -245,30 +250,40 @@ def scanner():
                 "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{name}",
                 "LTP": display_price, 
                 "Mom %": mom_pct,
-                "RSI": round(last['RSI'], 2), 
-                "ADX": round(last['ADX'], 2)
+                "RSI (5m)": curr_rsi, 
+                "ADX (5m)": curr_adx,
+                "OI Chg %": round(oi_change_pct, 2),
+                "Nature": nature 
             }
             
-            # 5. FILTER
-            if mom_pct > 0.1 and last['RSI'] > 55: bulls.append(row)
-            elif mom_pct < -0.1 and last['RSI'] < 45: bears.append(row)
+            # 5. FILTER LOGIC
+            # Bullish: RSI > 55, Momentum Positive
+            if mom_pct > 0.1 and curr_rsi > 55: 
+                bulls.append(row)
+            # Bearish: RSI < 45, Momentum Negative
+            elif mom_pct < -0.1 and curr_rsi < 45: 
+                bears.append(row)
             
             bar.progress((i+1)/len(valid_keys))
         except: pass
     
     bar.empty()
     
-    col_conf = {"Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"), "LTP": st.column_config.TextColumn("Price")}
+    col_conf = {
+        "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"),
+        "LTP": st.column_config.TextColumn("Price"),
+        "OI Chg %": st.column_config.NumberColumn("OI Chg %", format="%.2f%%")
+    }
     
     c1, c2 = st.columns(2)
     with c1:
-        st.success("🟢 TOP BULLS (Live)")
-        if bulls: st.dataframe(pd.DataFrame(bulls).sort_values("Mom %", ascending=False).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
+        st.success("🟢 TOP BULLS (5-Min)")
+        if bulls: st.dataframe(pd.DataFrame(bulls).sort_values("Mom %", ascending=False), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bullish signals.")
         
     with c2:
-        st.error("🔴 TOP BEARS (Live)")
-        if bears: st.dataframe(pd.DataFrame(bears).sort_values("Mom %", ascending=True).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
+        st.error("🔴 TOP BEARS (5-Min)")
+        if bears: st.dataframe(pd.DataFrame(bears).sort_values("Mom %", ascending=True), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
         
     st.markdown(f"<div style='text-align:left; color:grey; margin-top:20px;'>Last Updated: {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')}<br><strong>Powered by : i-Tech World</strong></div>", unsafe_allow_html=True)
