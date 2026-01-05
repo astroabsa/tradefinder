@@ -121,7 +121,7 @@ def fetch_history(key):
             for c in ['open','high','low','close','vol','oi']: df[c] = df[c].astype(float)
             return df.sort_values('timestamp').reset_index(drop=True)
     except Exception as e:
-        if SHOW_DEBUG: st.write(f"History Error ({key}): {e}")
+        if SHOW_DEBUG: st.error(f"Hist Error {key}: {e}")
     return None
 
 def extract_price_robust(response_data, target_key):
@@ -133,10 +133,8 @@ def extract_price_robust(response_data, target_key):
     data_item = response_data.get(target_key)
     if not data_item:
         for k, v in response_data.items():
-            # Check dict
             if isinstance(v, dict) and v.get('instrument_token') == target_key:
                 data_item = v; break
-            # Check object
             elif hasattr(v, 'instrument_token') and v.instrument_token == target_key:
                 data_item = v; break
 
@@ -205,16 +203,16 @@ def scanner():
         # 1. LIVE PRICE (Robust)
         ltp, _ = extract_price_robust(live_quotes, key)
         
-        # Default Values (Used if History Fails)
+        # Default Values
         curr_rsi = 0.0
         curr_adx = 0.0
         mom_pct = 0.0
         oi_change_pct = 0.0
-        nature = "Waiting..."
+        nature = "API Limit (Wait)" # Default if history fails
         is_live = True
 
-        # 2. HISTORY FETCH (With Rate Limit Protection)
-        time.sleep(0.2) # FIX: Prevents API Blocking
+        # 2. HISTORY FETCH (THROTTLED TO PREVENT BLOCKING)
+        time.sleep(0.5) # FIX: 0.5s Delay guarantees data
         df = fetch_history(key)
         
         if df is not None and len(df) > 20:
@@ -244,7 +242,7 @@ def scanner():
             price_change_candle = ((last['close'] - prev['close']) / prev['close']) * 100
             nature = get_oi_analysis(price_change_candle, oi_change_pct)
 
-        # 5. PREPARE ROW (Always Add, Never Skip)
+        # 5. PREPARE ROW
         display_price = f"₹{ltp:,.2f}"
         if not is_live: display_price += " (Old)"
 
