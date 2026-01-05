@@ -100,8 +100,8 @@ def fetch_live_quotes(keys_list):
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        # FIX: Explicitly name arguments to satisfy the SDK
-        response = quote_api.get_market_quote_ohlc(symbol=keys_str, api_version='2.0')
+        # FIX: Added 'interval="1d"' which was missing in your error
+        response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
         
         if response.status == 'success':
             return response.data
@@ -155,6 +155,9 @@ def market_dashboard():
             # OHLC Endpoint structure: { ohlc: { close: ..., open: ... }, last_price: ... }
             ltp = q.last_price
             close = q.ohlc.close
+            # If OHLC close is 0 (sometimes happens), use Open
+            if close == 0: close = q.ohlc.open 
+            
             if close > 0:
                 pct = ((ltp - close)/close)*100
                 return ltp, pct
