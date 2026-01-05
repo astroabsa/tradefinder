@@ -4,8 +4,6 @@ from upstox_client.rest import ApiException
 import pandas as pd
 import pandas_ta as ta
 import requests
-import gzip
-import io
 from datetime import datetime, timedelta
 import time
 import pytz
@@ -57,63 +55,50 @@ configuration.access_token = ACCESS_TOKEN
 history_api = upstox_client.HistoryApi(upstox_client.ApiClient(configuration))
 quote_api = upstox_client.MarketQuoteApi(upstox_client.ApiClient(configuration))
 
-# --- 4. SMART MAPPER ---
-@st.cache_data(ttl=3600*12) 
-def get_upstox_master_map():
-    symbol_map = {}
-    index_map = {}
-    try:
-        url = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
-        with gzip.GzipFile(fileobj=io.BytesIO(requests.get(url).content)) as f:
-            df = pd.read_json(f)
-        
-        # Equities
-        eq_df = df[df['segment'] == 'NSE_EQ']
-        symbol_map = dict(zip(eq_df['trading_symbol'], eq_df['instrument_key']))
-        
-        # Indices
-        nifty = df[df['trading_symbol'] == 'Nifty 50']['instrument_key'].values
-        bank = df[df['trading_symbol'] == 'Nifty Bank']['instrument_key'].values
-        
-        if len(nifty) > 0: index_map['Nifty 50'] = nifty[0]
-        if len(bank) > 0: index_map['Nifty Bank'] = bank[0]
-        
-    except Exception as e:
-        st.error(f"Master List Error: {e}")
-    
-    return symbol_map, index_map
+# --- 4. HARDCODED KEYS (100% Reliable) ---
+# We manually define the keys to avoid mapper errors
+INDICES = {
+    "NIFTY 50": "NSE_INDEX|Nifty 50",
+    "BANK NIFTY": "NSE_INDEX|Nifty Bank",
+    "SENSEX": "BSE_INDEX|SENSEX"
+}
 
-SYMBOL_MAP, INDEX_MAP = get_upstox_master_map()
-FNO_SYMBOLS = [
-    'RELIANCE.NS', 'INFY.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 
-    'ADANIENT.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'LT.NS', 'ITC.NS', 'BAJFINANCE.NS',
-    'MARUTI.NS', 'TATAMOTORS.NS', 'SUNPHARMA.NS', 'ONGC.NS', 'TITAN.NS', 'NTPC.NS',
-    'POWERGRID.NS', 'ULTRACEMCO.NS', 'WIPRO.NS', 'NESTLEIND.NS'
-]
+# Top F&O Stocks with Verified Keys
+STOCKS = {
+    "RELIANCE": "NSE_EQ|INE002A01018",
+    "TCS": "NSE_EQ|INE467B01029",
+    "HDFCBANK": "NSE_EQ|INE040A01034",
+    "ICICIBANK": "NSE_EQ|INE090A01021",
+    "SBIN": "NSE_EQ|INE062A01020",
+    "INFY": "NSE_EQ|INE009A01021",
+    "ITC": "NSE_EQ|INE154A01025",
+    "BHARTIARTL": "NSE_EQ|INE397D01024",
+    "LT": "NSE_EQ|INE018A01030",
+    "AXISBANK": "NSE_EQ|INE238A01034",
+    "KOTAKBANK": "NSE_EQ|INE237A01028",
+    "ULTRACEMCO": "NSE_EQ|INE481G01011",
+    "BAJFINANCE": "NSE_EQ|INE296A01024",
+    "MARUTI": "NSE_EQ|INE585B01010",
+    "SUNPHARMA": "NSE_EQ|INE044A01036",
+    "TITAN": "NSE_EQ|INE280A01028",
+    "TATAMOTORS": "NSE_EQ|INE155A01022",
+    "NTPC": "NSE_EQ|INE733E01010",
+    "POWERGRID": "NSE_EQ|INE752E01010",
+    "ADANIENT": "NSE_EQ|INE423A01024"
+}
 
-# --- 5. DATA FETCHING FUNCTIONS ---
+# --- 5. FUNCTIONS ---
 
-def fetch_live_ohlc(keys_list):
-    """Fetches OHLC Data (Good for Indices)"""
+def fetch_live_quotes(keys_list):
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        response = quote_api.get_market_quote_ohlc(symbol=keys_str, interval='1d', api_version='2.0')
-        if response.status == 'success': return response.data
+        # Using FULL market quote as it works best with NSE_EQ keys
+        response = quote_api.get_full_market_quote(symbol=keys_str, api_version='2.0')
+        if response.status == 'success':
+            return response.data
     except Exception as e:
-        if SHOW_DEBUG: st.error(f"OHLC API Error: {e}")
-    return {}
-
-def fetch_live_ltp(keys_list):
-    """Fetches ONLY Price (Faster/Lighter for Scanner)"""
-    if not keys_list: return {}
-    try:
-        keys_str = ",".join(keys_list)
-        # Use LTP Endpoint for stocks
-        response = quote_api.get_market_quote_ltp(symbol=keys_str, api_version='2.0')
-        if response.status == 'success': return response.data
-    except Exception as e:
-        if SHOW_DEBUG: st.error(f"LTP API Error: {e}")
+        if SHOW_DEBUG: st.error(f"API Error: {e}")
     return {}
 
 def fetch_history(key):
@@ -132,11 +117,8 @@ def fetch_history(key):
     except: pass
     return None
 
-# --- 6. DATA EXTRACTION HELPER ---
-def get_data_from_response(response_data, target_key, mode='OHLC'):
-    """
-    Safely extracts price from either OHLC or LTP response.
-    """
+def extract_data_robust(response_data, target_key):
+    """Robust extraction for both Dict and Object responses"""
     ltp, ref_price = 0.0, 0.0
     if not response_data: return 0.0, 0.0
 
@@ -154,31 +136,25 @@ def get_data_from_response(response_data, target_key, mode='OHLC'):
 
     # 2. Extract
     try:
-        # Handle Dictionary vs Object
         if isinstance(data_item, dict):
             ltp = float(data_item.get('last_price', 0))
-            if mode == 'OHLC':
-                ohlc = data_item.get('ohlc', {})
-                ref_price = float(ohlc.get('open', 0)) # Use Open for Day Change
+            ohlc = data_item.get('ohlc', {})
+            # Use OPEN for % Change reference
+            ref_price = float(ohlc.get('open', 0))
+            if ref_price == 0: ref_price = float(ohlc.get('close', 0))
         else:
             ltp = float(data_item.last_price)
-            if mode == 'OHLC':
-                ref_price = float(data_item.ohlc.open)
+            ref_price = float(data_item.ohlc.open)
+            if ref_price == 0: ref_price = float(data_item.ohlc.close)
     except: pass
 
     return ltp, ref_price
 
-# --- 7. DASHBOARD ---
+# --- 6. DASHBOARD ---
 @st.fragment(run_every=2)
 def market_dashboard():
-    indices = {
-        "NIFTY 50": INDEX_MAP.get("Nifty 50", "NSE_INDEX|Nifty 50"),
-        "BANK NIFTY": INDEX_MAP.get("Nifty Bank", "NSE_INDEX|Nifty Bank"),
-        "SENSEX": "BSE_INDEX|SENSEX"
-    }
-    
-    # Use OHLC for Dashboard to get Open price
-    live_data = fetch_live_ohlc(list(indices.values()))
+    # Fetch Data
+    live_data = fetch_live_quotes(list(INDICES.values()))
     
     if SHOW_DEBUG:
         with st.expander("🔍 Raw Dashboard Data", expanded=False):
@@ -186,11 +162,10 @@ def market_dashboard():
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.5])
     
-    n_ltp, n_open = get_data_from_response(live_data, indices["NIFTY 50"], 'OHLC')
-    b_ltp, b_open = get_data_from_response(live_data, indices["BANK NIFTY"], 'OHLC')
-    s_ltp, s_open = get_data_from_response(live_data, indices["SENSEX"], 'OHLC')
+    n_ltp, n_open = extract_data_robust(live_data, INDICES["NIFTY 50"])
+    b_ltp, b_open = extract_data_robust(live_data, INDICES["BANK NIFTY"])
+    s_ltp, s_open = extract_data_robust(live_data, INDICES["SENSEX"])
 
-    # Calc % (LTP - Open / Open)
     n_pct = ((n_ltp - n_open)/n_open)*100 if n_open > 0 else 0
     b_pct = ((b_ltp - b_open)/b_open)*100 if b_open > 0 else 0
     s_pct = ((s_ltp - s_open)/s_open)*100 if s_open > 0 else 0
@@ -208,47 +183,37 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 8. SCANNER ---
+# --- 7. SCANNER ---
 @st.fragment(run_every=180) 
 def scanner():
     bulls, bears = [], []
     bar = st.progress(0, "Scanning...")
     
-    valid_keys = []
-    key_to_name = {}
+    valid_keys = list(STOCKS.values())
     
-    for s in FNO_SYMBOLS:
-        clean = s.replace('.NS','')
-        if clean in SYMBOL_MAP:
-            k = SYMBOL_MAP[clean]
-            valid_keys.append(k)
-            key_to_name[k] = clean
-            
-    # Use LTP Endpoint for Scanner (Faster/Lighter)
-    live_quotes = fetch_live_ltp(valid_keys)
+    # 1. BATCH FETCH LIVE PRICES
+    live_quotes = fetch_live_quotes(valid_keys)
     
     if SHOW_DEBUG:
-        with st.expander("🔍 Raw Scanner Data (LTP)", expanded=True):
-            st.write(f"Requests Keys ({len(valid_keys)}): {valid_keys}")
+        with st.expander("🔍 Raw Scanner Data", expanded=True):
             st.write(live_quotes)
     
-    for i, key in enumerate(valid_keys):
+    for i, (name, key) in enumerate(STOCKS.items()):
         try:
-            # 1. LIVE PRICE
-            # We use 'LTP' mode which only looks for last_price
-            ltp, _ = get_data_from_response(live_quotes, key, 'LTP')
+            # 2. LIVE PRICE (Robust)
+            ltp, _ = extract_data_robust(live_quotes, key)
             
-            # 2. HISTORY (Indicators)
+            # 3. HISTORY (Indicators)
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
-            # FALLBACK: If Live LTP is 0, warn user or use history
+            # Fallback Check
             is_live = True
             if ltp == 0: 
                 ltp = df.iloc[-1]['close']
                 is_live = False
             
-            # Indicators
+            # 4. CALC INDICATORS
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
             df['EMA'] = ta.ema(df['close'], 5)
@@ -256,20 +221,21 @@ def scanner():
             last = df.iloc[-1]
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
-            # Format Price (Add * if delayed)
+            # Display Logic
             display_price = f"₹{ltp:,.2f}"
             if not is_live: display_price += " (Delayed)"
 
             row = {
-                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{key_to_name[key]}",
+                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{name}",
                 "LTP": display_price, 
                 "Mom %": mom_pct,
                 "RSI": round(last['RSI'], 2), 
                 "ADX": round(last['ADX'], 2)
             }
             
-            if mom_pct > 0.5 and last['RSI'] > 60: bulls.append(row)
-            elif mom_pct < -0.5 and last['RSI'] < 40: bears.append(row)
+            # 5. FILTER (Relaxed slightly to ensure data visibility)
+            if mom_pct > 0.1 and last['RSI'] > 55: bulls.append(row)
+            elif mom_pct < -0.1 and last['RSI'] < 45: bears.append(row)
             
             bar.progress((i+1)/len(valid_keys))
         except: pass
@@ -280,12 +246,12 @@ def scanner():
     
     c1, c2 = st.columns(2)
     with c1:
-        st.success("🟢 TOP 10 BULLS")
+        st.success("🟢 TOP BULLS (Live)")
         if bulls: st.dataframe(pd.DataFrame(bulls).sort_values("Mom %", ascending=False).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bullish signals.")
         
     with c2:
-        st.error("🔴 TOP 10 BEARS")
+        st.error("🔴 TOP BEARS (Live)")
         if bears: st.dataframe(pd.DataFrame(bears).sort_values("Mom %", ascending=True).head(10), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
         
