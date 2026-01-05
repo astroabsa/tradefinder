@@ -154,8 +154,8 @@ def get_sentiment(p_chg, oi_chg):
 @st.fragment(run_every=5)  # <--- CHANGED THIS
 def market_dashboard():
     indices = {
-        "NIFTY 50": "NSE_INDEX|Nifty 50",
-        "BANK NIFTY": "NSE_INDEX|Nifty Bank",
+        "NIFTY 50": "NSE_FO|NIFTY26JANFUT",  # Example Future Key
+        "BANK NIFTY": "NSE_FO|BANKNIFTY26JANFUT",
         "SENSEX": "BSE_INDEX|SENSEX"
     }
     
