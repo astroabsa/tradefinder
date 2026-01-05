@@ -71,8 +71,7 @@ def get_upstox_master_map():
         eq_df = df[df['segment'] == 'NSE_EQ']
         symbol_map = dict(zip(eq_df['trading_symbol'], eq_df['instrument_key']))
         
-        # Indices - FORCE CORRECT KEYS
-        # We manually find Nifty 50 and Bank Nifty to be 100% sure
+        # Indices - Manual Force
         nifty = df[df['trading_symbol'] == 'Nifty 50']['instrument_key'].values
         bank = df[df['trading_symbol'] == 'Nifty Bank']['instrument_key'].values
         
@@ -88,19 +87,22 @@ SYMBOL_MAP, INDEX_MAP = get_upstox_master_map()
 # Full list of stocks to scan
 FNO_SYMBOLS = [
     'RELIANCE.NS', 'INFY.NS', 'TCS.NS', 'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 
-    'ADANIENT.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'LT.NS', 'ITC.NS', 'BAJFINANCE.NS'
+    'ADANIENT.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'LT.NS', 'ITC.NS', 'BAJFINANCE.NS',
+    'MARUTI.NS', 'TATAMOTORS.NS', 'SUNPHARMA.NS', 'ONGC.NS', 'TITAN.NS', 'NTPC.NS',
+    'POWERGRID.NS', 'ULTRACEMCO.NS', 'WIPRO.NS', 'NESTLEIND.NS'
 ]
 
 # --- 5. FUNCTIONS ---
 def fetch_live_quotes(keys_list):
     """
-    Fetches LIGHTWEIGHT OHLC Quote (Faster & Less prone to errors)
+    Fetches LIGHTWEIGHT OHLC Quote (Keyword Arguments Fixed)
     """
     if not keys_list: return {}
     try:
         keys_str = ",".join(keys_list)
-        # CHANGED: Using get_market_quote_ohlc instead of full_market_quote
-        response = quote_api.get_market_quote_ohlc(keys_str, '2.0')
+        # FIX: Explicitly name arguments to satisfy the SDK
+        response = quote_api.get_market_quote_ohlc(symbol=keys_str, api_version='2.0')
+        
         if response.status == 'success':
             return response.data
     except Exception as e:
@@ -111,7 +113,11 @@ def fetch_history(key):
     try:
         to_d = datetime.now().strftime("%Y-%m-%d")
         from_d = (datetime.now() - timedelta(days=5)).strftime("%Y-%m-%d")
-        res = history_api.get_historical_candle_data1(key, '30minute', to_d, from_d, '2.0')
+        # Explicit arguments here too just in case
+        res = history_api.get_historical_candle_data1(
+            instrument_key=key, interval='30minute', 
+            to_date=to_d, from_date=from_d, api_version='2.0'
+        )
         if res.status == 'success' and res.data.candles:
             df = pd.DataFrame(res.data.candles, columns=['timestamp','open','high','low','close','vol','oi'])
             df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -177,7 +183,7 @@ def scanner():
     bulls, bears = [], []
     bar = st.progress(0, "Scanning...")
     
-    # Resolve keys
+    # Resolve keys and create a REVERSE MAP for correct naming
     valid_keys = []
     key_to_name = {}
     
@@ -186,7 +192,7 @@ def scanner():
         if clean in SYMBOL_MAP:
             k = SYMBOL_MAP[clean]
             valid_keys.append(k)
-            key_to_name[k] = clean
+            key_to_name[k] = clean # Store "RELIANCE" for key "NSE_EQ|..."
             
     # Batch Fetch Live Prices
     live_quotes = fetch_live_quotes(valid_keys)
@@ -202,7 +208,7 @@ def scanner():
             df = fetch_history(key)
             if df is None or len(df) < 30: continue
             
-            # If Live API failed, fallback to history close (better than 0)
+            # If Live API failed, fallback to history close
             if ltp == 0: ltp = df.iloc[-1]['close']
             
             # Calc
@@ -214,8 +220,11 @@ def scanner():
             # MOMENTUM: Compare LIVE PRICE to EMA (Most active signal)
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
+            # FIX: Ensure correct name lookup
+            symbol_name = key_to_name.get(key, "Unknown")
+            
             row = {
-                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{key_to_name[key]}",
+                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{symbol_name}",
                 "LTP": ltp, "Mom %": mom_pct,
                 "RSI": round(last['RSI'], 2), "ADX": round(last['ADX'], 2)
             }
