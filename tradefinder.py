@@ -108,12 +108,11 @@ def fetch_live_batch(keys_list, mode='FULL'):
 def fetch_history(key):
     try:
         to_d = datetime.now().strftime("%Y-%m-%d")
-        # Fetch fewer days for speed
         from_d = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
         
-        # CHANGED: '30minute' -> '5minute' for faster signals
+        # CHANGED: '5minute' -> '15minute'
         res = history_api.get_historical_candle_data1(
-            instrument_key=key, interval='5minute', 
+            instrument_key=key, interval='15minute', 
             to_date=to_d, from_date=from_d, api_version='2.0'
         )
         if res.status == 'success' and res.data.candles:
@@ -191,11 +190,11 @@ def market_dashboard():
 market_dashboard()
 st.markdown("---")
 
-# --- 7. SCANNER (Stocks - 5 Min Logic) ---
-@st.fragment(run_every=60) # Refresh every 60s for 5-min candles
+# --- 7. SCANNER (Stocks - 15 Min Logic) ---
+@st.fragment(run_every=60) # Refresh every 60s for Price updates
 def scanner():
     bulls, bears = [], []
-    bar = st.progress(0, "Scanning (5-Min TF)...")
+    bar = st.progress(0, "Scanning (15-Min TF)...")
     
     valid_keys = list(STOCKS.values())
     live_quotes = fetch_live_batch(valid_keys, mode='FULL')
@@ -209,7 +208,7 @@ def scanner():
             # 1. LIVE PRICE
             ltp, _ = extract_price_robust(live_quotes, key)
             
-            # 2. HISTORY (5-Minute Candles)
+            # 2. HISTORY (15-Minute Candles)
             df = fetch_history(key)
             if df is None or len(df) < 20: continue
             
@@ -219,7 +218,7 @@ def scanner():
                 ltp = df.iloc[-1]['close']
                 is_live = False
             
-            # 3. TECHNICALS (RSI & ADX on 5-Min)
+            # 3. TECHNICALS (RSI & ADX on 15-Min)
             df['RSI'] = ta.rsi(df['close'], 14)
             df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
             df['EMA'] = ta.ema(df['close'], 5) # 5-Period EMA
@@ -232,14 +231,12 @@ def scanner():
             mom_pct = round(((ltp - last['EMA'])/last['EMA'])*100, 2)
             
             # 4. OPEN INTEREST ANALYSIS
-            # Calculate % Change in OI from previous candle
             curr_oi = last['oi']
             prev_oi = prev['oi']
             oi_change_pct = 0.0
             if prev_oi > 0:
                 oi_change_pct = ((curr_oi - prev_oi) / prev_oi) * 100
                 
-            # Determine Nature (Bullish/Bearish based on OI)
             price_change_candle = ((last['close'] - prev['close']) / prev['close']) * 100
             nature, nature_color = get_oi_analysis(price_change_candle, oi_change_pct)
 
@@ -250,8 +247,8 @@ def scanner():
                 "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{name}",
                 "LTP": display_price, 
                 "Mom %": mom_pct,
-                "RSI (5m)": curr_rsi, 
-                "ADX (5m)": curr_adx,
+                "RSI (15m)": curr_rsi, 
+                "ADX (15m)": curr_adx,
                 "OI Chg %": round(oi_change_pct, 2),
                 "Nature": nature 
             }
@@ -277,12 +274,12 @@ def scanner():
     
     c1, c2 = st.columns(2)
     with c1:
-        st.success("🟢 TOP BULLS (5-Min)")
+        st.success("🟢 TOP BULLS (15-Min)")
         if bulls: st.dataframe(pd.DataFrame(bulls).sort_values("Mom %", ascending=False), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bullish signals.")
         
     with c2:
-        st.error("🔴 TOP BEARS (5-Min)")
+        st.error("🔴 TOP BEARS (15-Min)")
         if bears: st.dataframe(pd.DataFrame(bears).sort_values("Mom %", ascending=True), use_container_width=True, hide_index=True, column_config=col_conf)
         else: st.info("No bearish signals.")
         
