@@ -48,7 +48,7 @@ except Exception as e: st.error(f"API Error: {e}"); st.stop()
 INDEX_CONFIG = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51206', 'seg': 'BSE_IDX', 'name': 'SENSEX'}
+    'SENSEX': {'id': '51', 'seg': 'BSE_I', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
