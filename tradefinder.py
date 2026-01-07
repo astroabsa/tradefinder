@@ -84,7 +84,7 @@ def get_fno_stock_map():
                 valid_futures = stk_df[stk_df['dt_parsed'] >= today]
                 
                 if len(valid_futures) > 0:
-                    st.sidebar.write("👇 **Scanning These Symbols (First 5):**")
+                    st.sidebar.write("👇 **Scanning First 5 Symbols:**")
                     st.sidebar.code("\n".join(valid_futures[col_name].head(5).tolist()))
 
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
@@ -177,17 +177,27 @@ def refreshable_scanner():
                 with st.expander(f"🛠️ X-Ray Debug: Checking first symbol '{sym}' (ID: {sid})", expanded=True):
                     st.write("Status:", res.get('status'))
                     candle_count = len(res.get('data', {}).get('close', [])) if res.get('data') else 0
-                    st.write(f"Candles Found: {candle_count} (Needs > 0 to appear in table)")
-                    if candle_count < 14: st.warning("⚠️ Less than 14 candles! RSI/ADX will be 0, but Price will show.")
+                    st.write(f"Candles Found: {candle_count}")
+                    st.json(res) # Show Raw JSON to confirm keys
 
             # Process Data
             if res['status'] == 'success':
                 raw_data = res['data']
                 if raw_data:
                     df = pd.DataFrame(raw_data)
-                    df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
                     
-                    # FIX: CHANGED MINIMUM LENGTH FROM 20 TO 1
+                    # FIX: Handle missing 'oi' and alternate time keys
+                    rename_map = {
+                        'start_Time':'datetime', 'timestamp':'datetime', # Handle both
+                        'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 
+                        'oi':'OI'
+                    }
+                    df.rename(columns=rename_map, inplace=True)
+                    
+                    # FIX: Inject missing 'OI' column with 0s if it doesn't exist
+                    if 'OI' not in df.columns:
+                        df['OI'] = 0
+                    
                     if not df.empty and len(df) > 0:
                         
                         # Safe Indicator Calculation
@@ -230,7 +240,6 @@ def refreshable_scanner():
                         r_m = row.copy(); r_m['Sort'] = sym
                         all_data.append(r_m)
                         
-                        # Only add to Bulls/Bears if RSI is valid (non-zero)
                         if curr_rsi > 0:
                             if p_chg > 0.5 and curr_rsi > 60 and curr_adx > 20: bull.append(row)
                             elif p_chg < -0.5 and curr_rsi < 45 and curr_adx > 20: bear.append(row)
