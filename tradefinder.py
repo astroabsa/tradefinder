@@ -57,27 +57,25 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 5. ROBUST MASTER LIST LOADER ---
 # --- 5. LOCAL MASTER LIST LOADER (STABLE VERSION) ---
 @st.cache_data(ttl=3600*4)
 def get_master_data_map():
     fno_map = {}
     index_map = {}
     
-    # Hardcoded Defaults (Just in case)
+    # Hardcoded Defaults (Fallback to prevent "INDEX_MAP not defined" error)
     index_map['NIFTY'] = '13'
     index_map['BANKNIFTY'] = '25'
     
     try:
         # 1. READ LOCAL FILE INSTEAD OF URL
-        # Make sure 'dhan_master.csv' is in the same folder as app.py
+        # Ensure 'dhan_master.csv' is uploaded to your repo
         df = pd.read_csv("dhan_master.csv")
         
-        # Clean column names (strip spaces)
+        # Clean column names
         df.columns = df.columns.str.strip()
         
-        # 2. STANDARD COLUMNS (Dhan CSV format)
-        # We assume the standard names since you downloaded the official file
+        # 2. STANDARD COLUMNS
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
         col_name = 'SEM_TRADING_SYMBOL'
@@ -96,15 +94,10 @@ def get_master_data_map():
         # Helper to find nearest expiry
         def get_current_futures(dataframe):
             if 'SEM_EXPIRY_DATE' in dataframe.columns:
-                # Parse Dates
                 dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
                 today = pd.Timestamp.now().normalize()
-                
-                # Filter Future Dates
                 valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
-                # Sort to find nearest
                 valid = valid.sort_values(by=[col_name, 'SEM_EXPIRY_DATE'])
-                # Pick nearest
                 return valid.drop_duplicates(subset=[col_name], keep='first')
             return dataframe
 
@@ -130,8 +123,7 @@ def get_master_data_map():
     except Exception as e:
         st.error(f"Master List Error: {e}")
     
-    return fno_map, index_map
-# --- 6. DATA FETCHING ---
+    return fno_map, index_map# --- 6. DATA FETCHING ---
 def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
