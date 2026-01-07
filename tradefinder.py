@@ -44,7 +44,7 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX MAP (Corrected IDs) ---
+# --- 5. INDEX MAP ---
 INDEX_MAP = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
@@ -111,30 +111,29 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (HYBRID + CORRECT CHANGE MATH) ---
+# --- 9. DASHBOARD (ROBUST HYBRID LOGIC) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
     for key, info in INDEX_MAP.items():
         try:
-            # 1. Sensex Logic (Use Quote for Price)
+            # --- STRATEGY A: QUOTE (Best for Sensex) ---
             if key == 'SENSEX':
-                res = dhan.get_quote(info['id'], info['seg'], "INDEX")
+                # Use 'BSE' exchange code explicitly
+                res = dhan.get_quote(info['id'], 'BSE', 'INDEX')
                 if res['status'] == 'success' and 'data' in res:
                     d = res['data']
-                    ltp = d.get('last_price', 0.0)
-                    # For Quote API, 'previous_close' is usually accurate
-                    prev = d.get('previous_close', ltp)
+                    ltp = float(d.get('last_price', 0.0))
+                    prev = float(d.get('previous_close', ltp))
                     if prev == 0: prev = ltp
-                    
                     chg = ltp - prev
                     pct = (chg / prev) * 100
                     data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
                 else:
                     data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
             
-            # 2. Nifty/BankNifty Logic (Use Charts for Price)
+            # --- STRATEGY B: CHART (Best for Nifty/BankNifty) ---
             else:
                 to_d = datetime.now().strftime('%Y-%m-%d')
                 from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
@@ -142,28 +141,27 @@ def refreshable_dashboard():
                 
                 if r['status'] == 'success' and r['data'].get('close'):
                     closes = r['data']['close']
-                    times = r['data']['start_Time'] # Get time to find "Yesterday"
-                    
+                    times = r['data']['start_Time']
                     ltp = closes[-1]
                     
-                    # --- SMART CHANGE CALCULATION ---
-                    # Create a mini DF to find yesterday's last candle easily
-                    df_mini = pd.DataFrame({'close': closes, 'time': times})
-                    df_mini['time'] = pd.to_datetime(df_mini['time'])
-                    # Normalize to date only
-                    df_mini['date'] = df_mini['time'].dt.normalize()
+                    # --- ROBUST PREV CLOSE FINDER (No Timezones) ---
+                    # 1. Create Dataframe
+                    df_mini = pd.DataFrame({'c': closes, 't': times})
+                    # 2. Extract just the DATE part as a string (YYYY-MM-DD)
+                    df_mini['date_str'] = df_mini['t'].astype(str).str[:10]
+                    # 3. Get unique dates
+                    unique_dates = df_mini['date_str'].unique()
                     
-                    today = pd.Timestamp.now().normalize()
-                    # Filter for rows strictly BEFORE today
-                    yesterday_data = df_mini[df_mini['date'] < today]
-                    
-                    if not yesterday_data.empty:
-                        # Official Close = Last candle of yesterday
-                        prev = yesterday_data.iloc[-1]['close']
+                    if len(unique_dates) > 1:
+                        # "Yesterday" is simply the second-to-last date in the list
+                        yesterday_date = unique_dates[-2]
+                        # Get the last close price of that date
+                        prev = df_mini[df_mini['date_str'] == yesterday_date].iloc[-1]['c']
                     else:
-                        # Fallback (e.g. Monday morning looking for Friday)
-                        prev = closes[0] 
+                        # If only 1 day of data exists (e.g. Day 1 of listing), use Open
+                        prev = df_mini.iloc[0]['c']
 
+                    if prev == 0: prev = ltp
                     chg = ltp - prev
                     pct = (chg / prev) * 100
                     data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
