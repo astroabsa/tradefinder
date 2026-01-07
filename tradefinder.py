@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import time
 import os
 
-# --- 1. CONFIG ---
+# --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
 
 # --- 2. AUTHENTICATION ---
@@ -32,7 +32,7 @@ if not st.session_state["authenticated"]:
             else: st.error("Invalid Credentials")
     st.stop()
 
-# --- 3. MAIN START ---
+# --- 3. MAIN UI ---
 st.title("🚀 Absa's Live F&O Screener Pro")
 if st.sidebar.button("Log out"): st.session_state["authenticated"] = False; st.rerun()
 
@@ -45,7 +45,13 @@ try:
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
 # --- 5. INDEX MAP ---
-INDEX_MAP = {'NIFTY': '13', 'BANKNIFTY': '25', 'SENSEX': '51206'}
+# Using standard Exchange Segment IDs
+# NSE=1, BSE=11. 
+INDEX_MAP = {
+    'NIFTY': {'id': '13', 'exch': 'NSE'}, 
+    'BANKNIFTY': {'id': '25', 'exch': 'NSE'}, 
+    'SENSEX': {'id': '51206', 'exch': 'BSE'}
+}
 
 # --- 6. MASTER LIST LOADER ---
 @st.cache_data(ttl=3600*4)
@@ -77,7 +83,6 @@ def get_fno_stock_map():
                 
                 today = pd.Timestamp.now().normalize()
                 valid_futures = stk_df[stk_df['dt_parsed'] >= today]
-
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
                 curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
                 
@@ -92,88 +97,66 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DATA FETCHING (UPDATED TO DAILY FOR OI) ---
-def fetch_daily_data(security_id):
+# --- 7. DATA FETCHING (Robust) ---
+def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
-        from_date = (datetime.now() - timedelta(days=20)).strftime('%Y-%m-%d')
-        
-        # Fetch Daily Candles (Guarantees OI Data)
-        res = dhan.historical_daily_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date)
-        
-        if res['status'] == 'success':
-            df = pd.DataFrame(res['data'])
-            if df.empty: return pd.DataFrame()
-            
-            # Standardize Columns
-            rename_map = {'start_Time':'datetime', 'timestamp':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}
-            df.rename(columns=rename_map, inplace=True)
-            return df
-    except: pass
-    return pd.DataFrame()
+        from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+        res = dhan.intraday_minute_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date, interval)
+        return res
+    except Exception as e: return {"status": "failure", "remarks": str(e)}
 
-# --- 8. OI LOGIC ---
-def get_oi_analysis(price_chg, oi_chg):
-    if price_chg > 0 and oi_chg > 0: return "Long Buildup 🟢"
-    if price_chg < 0 and oi_chg > 0: return "Short Buildup 🔴"
-    if price_chg < 0 and oi_chg < 0: return "Long Unwinding ⚠️"
-    if price_chg > 0 and oi_chg < 0: return "Short Covering 🚀"
+# --- 8. ANALYSIS LOGIC (Updated for Volume) ---
+def get_trend_analysis(price_chg, vol_ratio):
+    # vol_ratio > 1.0 means Current Volume is higher than Average
+    if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
+    if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
+    if price_chg > 0: return "Mild Bullish ↗️"
+    if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (UPDATED TO GET_QUOTE) ---
+# --- 9. DASHBOARD (Uses Quote API) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    # Use Get Quote for Live Snapshot (More reliable than charts)
-    indices = [
-        {"name": "NIFTY 50", "key": "NIFTY", "seg": "IDX_I", "exch": "NSE"},
-        {"name": "BANK NIFTY", "key": "BANKNIFTY", "seg": "IDX_I", "exch": "NSE"},
-        {"name": "SENSEX", "key": "SENSEX", "seg": "BSE_IDX", "exch": "BSE"}
-    ]
+    indices = ["NIFTY", "BANKNIFTY", "SENSEX"]
     data = {}
     
-    for i in indices:
+    for name in indices:
+        item = INDEX_MAP[name]
         try:
-            # fetch quote
-            sec_id = INDEX_MAP[i['key']]
-            # Map exchanges: NSE=1, BSE=11? No, verify standard constants or strings
-            # DhanHQ library uses specific constants. Let's try passing the string logic if constants fail
-            # Safest is to use the constants if available, else strings.
-            # NSE Index = 1 (NSE), Instrument = 0 (INDEX)
-            # BSE Index = 11 (BSE), Instrument = 0 (INDEX)
+            # Fetch Live Quote (Most Reliable)
+            exch_code = item['exch'] # NSE or BSE
+            res = dhan.get_quote(item['id'], exch_code, "INDEX")
             
-            # Using simple Quote API
-            q = dhan.get_quote(sec_id, i['exch'], "INDEX")
-            
-            if q['status'] == 'success' and 'data' in q:
-                d = q['data']
+            if res['status'] == 'success':
+                d = res['data']
                 ltp = d.get('last_price', 0.0)
-                # Calculate change from previous close
-                prev_close = d.get('previous_close', ltp)
-                if prev_close == 0: prev_close = ltp
+                prev = d.get('previous_close', ltp)
+                if prev == 0: prev = ltp
                 
-                chg = ltp - prev_close
-                pct = (chg / prev_close) * 100
-                data[i['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+                chg = ltp - prev
+                pct = (chg / prev) * 100
+                data[name] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
-                data[i['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+                data[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
         except: 
-            data[i['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            data[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.2])
-    with c1: d=data.get("NIFTY 50"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
-    with c2: d=data.get("BANK NIFTY"); st.metric("BANK NIFTY", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c1: d=data.get("NIFTY"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c2: d=data.get("BANKNIFTY"); st.metric("BANK NIFTY", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
     with c3: d=data.get("SENSEX"); st.metric("SENSEX", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
     with c4:
         bias, color = ("SIDEWAYS ↔️", "gray")
-        if data.get("NIFTY 50")['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
-        elif data.get("NIFTY 50")['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
+        if data.get("NIFTY")['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
+        elif data.get("NIFTY")['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
 # --- 10. SCANNER ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
-    st.caption(f"Scanning {len(FNO_MAP)} symbols... (Live Daily Candles for OI)")
+    st.caption(f"Scanning {len(FNO_MAP)} symbols... (Using Volume for Trend Analysis)")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     targets = list(FNO_MAP.keys())
@@ -185,60 +168,70 @@ def refreshable_scanner():
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
-            # Fetch Daily Data (Guarantees OI)
-            df = fetch_daily_data(sid)
+            res = fetch_futures_data(sid, interval=60)
             
-            if not df.empty and len(df) > 1:
-                # Ensure OI column exists
-                if 'OI' not in df.columns: df['OI'] = 0
-                
-                # Indicators
-                df['RSI'] = ta.rsi(df['Close'], 14)
-                df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
-                df['EMA'] = ta.ema(df['Close'], 5)
-                
-                # Data Points
-                curr = df.iloc[-1] # Today (Live Candle)
-                prev = df.iloc[-2] # Yesterday
-                
-                ltp = curr['Close']
-                p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
-                
-                # OI Calculation
-                curr_oi = curr['OI']
-                prev_oi = prev['OI']
-                o_chg = 0.0
-                if prev_oi > 0:
-                    o_chg = round(((curr_oi - prev_oi)/prev_oi)*100, 2)
-                
-                # Analysis
-                sent = get_oi_analysis(p_chg, o_chg)
-                
-                # Momentum
-                mom = 0.0
-                if pd.notna(df['EMA'].iloc[-1]):
-                    mom = round(((ltp - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
-                
-                # Safely get RSI/ADX
-                curr_rsi = round(curr['RSI'], 1) if pd.notna(curr['RSI']) else 0
-                curr_adx = round(curr['ADX'], 1) if pd.notna(curr['ADX']) else 0
+            if res['status'] == 'success':
+                raw_data = res['data']
+                if raw_data:
+                    df = pd.DataFrame(raw_data)
+                    rename_map = {'start_Time':'datetime', 'timestamp':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}
+                    df.rename(columns=rename_map, inplace=True)
+                    
+                    if not df.empty and len(df) > 0:
+                        # --- INDICATORS ---
+                        if len(df) >= 14:
+                            df['RSI'] = ta.rsi(df['Close'], 14)
+                            df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
+                            curr_rsi = df['RSI'].iloc[-1]
+                            curr_adx = df['ADX'].iloc[-1]
+                        else: curr_rsi = 0.0; curr_adx = 0.0
 
-                row = {
-                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
-                    "LTP": round(ltp, 2), "Mom %": mom, "Price Chg%": p_chg,
-                    "RSI": curr_rsi, "ADX": curr_adx,
-                    "OI Chg%": o_chg, "Analysis": sent
-                }
+                        if len(df) >= 5:
+                            df['EMA'] = ta.ema(df['Close'], 5)
+                            mom = round(((df['Close'].iloc[-1] - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
+                        else: mom = 0.0
+
+                        # --- VOLUME ANALYSIS (Substitute for OI) ---
+                        curr_vol = df['Volume'].iloc[-1]
+                        avg_vol = df['Volume'].rolling(10).mean().iloc[-1] if len(df) > 10 else curr_vol
+                        vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1.0
+
+                        # --- PRICE DATA ---
+                        curr = df.iloc[-1]
+                        ltp = curr['Close']
+                        
+                        if len(df) > 1:
+                            prev = df.iloc[-2]
+                            p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
+                        else: p_chg = 0.0
+                            
+                        # --- ANALYSIS ---
+                        sent = get_trend_analysis(p_chg, vol_ratio)
+                        
+                        row = {
+                            "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
+                            "LTP": round(ltp, 2), "Mom %": mom, "Price Chg%": p_chg,
+                            "RSI": round(curr_rsi, 1), "ADX": round(curr_adx, 1),
+                            "Vol Ratio": round(vol_ratio, 1), "Analysis": sent
+                        }
+                        
+                        r_m = row.copy(); r_m['Sort'] = sym
+                        all_data.append(r_m)
+                        
+                        # --- SIGNALS ---
+                        if curr_rsi > 0:
+                            # Bullish: Up Move + RSI Healthy + ADX Trending
+                            if p_chg > 0.5 and curr_rsi > 55 and curr_adx > 20: bull.append(row)
+                            # Bearish: Down Move + RSI Weak + ADX Trending
+                            elif p_chg < -0.5 and curr_rsi < 45 and curr_adx > 20: bear.append(row)
+                            
+            # Rate Limit Protection
+            elif res.get('remarks', '') == 'Too Many Requests':
+                time.sleep(1.5) # Wait longer if hit limit
                 
-                r_m = row.copy(); r_m['Sort'] = sym
-                all_data.append(r_m)
-                
-                if curr_rsi > 0:
-                    if p_chg > 0.5 and curr_rsi > 60 and curr_adx > 20: bull.append(row)
-                    elif p_chg < -0.5 and curr_rsi < 45 and curr_adx > 20: bear.append(row)
         except: pass
         
-        time.sleep(0.15) 
+        time.sleep(0.12) # Safe Base Delay
         bar.progress((i+1)/len(targets))
     
     bar.empty()
@@ -249,7 +242,7 @@ def refreshable_scanner():
         "Price Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
         "RSI": st.column_config.NumberColumn("RSI", format="%.1f"),
         "ADX": st.column_config.NumberColumn("ADX", format="%.1f"),
-        "OI Chg%": st.column_config.NumberColumn("OI%", format="%.2f%%"),
+        "Vol Ratio": st.column_config.NumberColumn("Vol x", format="%.1fx"),
         "Analysis": st.column_config.TextColumn("Analysis", width="medium")
     }
     
