@@ -44,13 +44,12 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX MAP ---
-# Using standard Exchange Segment IDs
-# NSE=1, BSE=11. 
-INDEX_MAP = {
-    'NIFTY': {'id': '13', 'exch': 'NSE'}, 
-    'BANKNIFTY': {'id': '25', 'exch': 'NSE'}, 
-    'SENSEX': {'id': '51206', 'exch': 'BSE'}
+# --- 5. INDEX CONFIGURATION ---
+# Correct Segment Codes are Critical for get_quote
+INDEX_CONFIG = {
+    'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
+    'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
+    'SENSEX': {'id': '51206', 'seg': 'BSE_IDX', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -97,7 +96,7 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DATA FETCHING (Robust) ---
+# --- 7. DATA FETCHING ---
 def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
@@ -106,29 +105,25 @@ def fetch_futures_data(security_id, interval=60):
         return res
     except Exception as e: return {"status": "failure", "remarks": str(e)}
 
-# --- 8. ANALYSIS LOGIC (Updated for Volume) ---
+# --- 8. ANALYSIS LOGIC (Updated) ---
 def get_trend_analysis(price_chg, vol_ratio):
-    # vol_ratio > 1.0 means Current Volume is higher than Average
     if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
     if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
     if price_chg > 0: return "Mild Bullish ↗️"
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (Uses Quote API) ---
+# --- 9. DASHBOARD (FIXED: Correct Segment IDs) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    indices = ["NIFTY", "BANKNIFTY", "SENSEX"]
     data = {}
     
-    for name in indices:
-        item = INDEX_MAP[name]
+    for key, info in INDEX_CONFIG.items():
         try:
-            # Fetch Live Quote (Most Reliable)
-            exch_code = item['exch'] # NSE or BSE
-            res = dhan.get_quote(item['id'], exch_code, "INDEX")
+            # Using specific segments (IDX_I, BSE_IDX) ensures data
+            res = dhan.get_quote(info['id'], info['seg'], "INDEX")
             
-            if res['status'] == 'success':
+            if res['status'] == 'success' and 'data' in res:
                 d = res['data']
                 ltp = d.get('last_price', 0.0)
                 prev = d.get('previous_close', ltp)
@@ -136,27 +131,28 @@ def refreshable_dashboard():
                 
                 chg = ltp - prev
                 pct = (chg / prev) * 100
-                data[name] = {"ltp": ltp, "chg": chg, "pct": pct}
+                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
-                data[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
         except: 
-            data[name] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.2])
-    with c1: d=data.get("NIFTY"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
-    with c2: d=data.get("BANKNIFTY"); st.metric("BANK NIFTY", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c1: d=data.get("NIFTY 50"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c2: d=data.get("BANK NIFTY"); st.metric("BANK NIFTY", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
     with c3: d=data.get("SENSEX"); st.metric("SENSEX", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
     with c4:
         bias, color = ("SIDEWAYS ↔️", "gray")
-        if data.get("NIFTY")['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
-        elif data.get("NIFTY")['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
+        nifty_pct = data.get("NIFTY 50", {}).get('pct', 0)
+        if nifty_pct > 0.25: bias, color = ("BULLISH 🚀", "green")
+        elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
-# --- 10. SCANNER ---
+# --- 10. SCANNER (RELAXED CRITERIA) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
-    st.caption(f"Scanning {len(FNO_MAP)} symbols... (Using Volume for Trend Analysis)")
+    st.caption(f"Scanning {len(FNO_MAP)} symbols...")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     targets = list(FNO_MAP.keys())
@@ -178,7 +174,7 @@ def refreshable_scanner():
                     df.rename(columns=rename_map, inplace=True)
                     
                     if not df.empty and len(df) > 0:
-                        # --- INDICATORS ---
+                        # Indicators
                         if len(df) >= 14:
                             df['RSI'] = ta.rsi(df['Close'], 14)
                             df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
@@ -191,12 +187,11 @@ def refreshable_scanner():
                             mom = round(((df['Close'].iloc[-1] - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
                         else: mom = 0.0
 
-                        # --- VOLUME ANALYSIS (Substitute for OI) ---
+                        # Volume Analysis
                         curr_vol = df['Volume'].iloc[-1]
                         avg_vol = df['Volume'].rolling(10).mean().iloc[-1] if len(df) > 10 else curr_vol
                         vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1.0
 
-                        # --- PRICE DATA ---
                         curr = df.iloc[-1]
                         ltp = curr['Close']
                         
@@ -205,7 +200,6 @@ def refreshable_scanner():
                             p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
                         else: p_chg = 0.0
                             
-                        # --- ANALYSIS ---
                         sent = get_trend_analysis(p_chg, vol_ratio)
                         
                         row = {
@@ -218,20 +212,21 @@ def refreshable_scanner():
                         r_m = row.copy(); r_m['Sort'] = sym
                         all_data.append(r_m)
                         
-                        # --- SIGNALS ---
+                        # --- SIGNALS (RELAXED) ---
                         if curr_rsi > 0:
-                            # Bullish: Up Move + RSI Healthy + ADX Trending
-                            if p_chg > 0.5 and curr_rsi > 55 and curr_adx > 20: bull.append(row)
-                            # Bearish: Down Move + RSI Weak + ADX Trending
-                            elif p_chg < -0.5 and curr_rsi < 45 and curr_adx > 20: bear.append(row)
+                            # Bullish: Strong Momentum OR Recovering RSI
+                            if p_chg > 0.3 and curr_rsi > 55: 
+                                bull.append(row)
+                            # Bearish: Dropping Price + RSI below neutral
+                            elif p_chg < -0.3 and curr_rsi < 52: 
+                                bear.append(row)
                             
-            # Rate Limit Protection
             elif res.get('remarks', '') == 'Too Many Requests':
-                time.sleep(1.5) # Wait longer if hit limit
+                time.sleep(1.5)
                 
         except: pass
         
-        time.sleep(0.12) # Safe Base Delay
+        time.sleep(0.12)
         bar.progress((i+1)/len(targets))
     
     bar.empty()
@@ -251,11 +246,11 @@ def refreshable_scanner():
         with c1: 
             st.success(f"🟢 BULLS ({len(bull)})")
             if bull: st.dataframe(pd.DataFrame(bull).sort_values("Mom %", ascending=False).head(20), use_container_width=True, hide_index=True, column_config=cfg)
-            else: st.info("No Bullish setups.")
+            else: st.info("No Strong Bullish setups.")
         with c2: 
             st.error(f"🔴 BEARS ({len(bear)})")
             if bear: st.dataframe(pd.DataFrame(bear).sort_values("Mom %", ascending=True).head(20), use_container_width=True, hide_index=True, column_config=cfg)
-            else: st.info("No Bearish setups.")
+            else: st.info("No Strong Bearish setups.")
             
     with tab2:
         if all_data: 
