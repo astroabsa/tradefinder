@@ -131,7 +131,6 @@ def refreshable_dashboard():
         try:
             to_d = datetime.now().strftime('%Y-%m-%d')
             from_d = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-            # Fetch full response
             r = dhan.intraday_minute_data(INDEX_MAP[i['key']], i['seg'], "INDEX", from_d, to_d, 1)
             
             if r['status'] == 'success' and r['data'].get('close'):
@@ -158,8 +157,7 @@ def refreshable_dashboard():
 def refreshable_scanner():
     st.markdown("---")
     
-    # --- VISUAL DEBUGGER FOR THE USER ---
-    st.info("🔍 **System Status:** Scanning has started. Check the Debug Box below if results are empty.")
+    st.info("🔍 **System Status:** Scanning has started. Check the X-Ray Debugger below.")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     
@@ -172,21 +170,15 @@ def refreshable_scanner():
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
-            
-            # --- X-RAY DEBUG: PRINT FIRST RESULT TO SCREEN ---
             res = fetch_futures_data(sid, interval=60)
             
+            # --- X-RAY DEBUG ---
             if i == 0:
                 with st.expander(f"🛠️ X-Ray Debug: Checking first symbol '{sym}' (ID: {sid})", expanded=True):
-                    st.write("**API Status:**", res.get('status'))
-                    st.write("**Data Received:**", "Yes" if res.get('data') else "No (Empty List)")
-                    if res.get('status') == 'failure':
-                        st.error(f"API Error Message: {res.get('remarks')}")
-                    elif not res.get('data'):
-                         st.warning("⚠️ API returned 'Success' but DATA IS EMPTY. This means no trades happened today or the Security ID is wrong.")
-                    else:
-                        st.success(f"✅ Data looks good! Found {len(res['data']['open'])} candles.")
-                        st.json(res) # Show Raw JSON
+                    st.write("Status:", res.get('status'))
+                    candle_count = len(res.get('data', {}).get('close', [])) if res.get('data') else 0
+                    st.write(f"Candles Found: {candle_count} (Needs > 0 to appear in table)")
+                    if candle_count < 14: st.warning("⚠️ Less than 14 candles! RSI/ADX will be 0, but Price will show.")
 
             # Process Data
             if res['status'] == 'success':
@@ -195,33 +187,55 @@ def refreshable_scanner():
                     df = pd.DataFrame(raw_data)
                     df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
                     
-                    if not df.empty and len(df) > 20:
-                        df['RSI'] = ta.rsi(df['Close'], 14)
-                        df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
-                        df['EMA'] = ta.ema(df['Close'], 5)
+                    # FIX: CHANGED MINIMUM LENGTH FROM 20 TO 1
+                    if not df.empty and len(df) > 0:
                         
-                        curr = df.iloc[-1]; prev = df.iloc[-2]
+                        # Safe Indicator Calculation
+                        if len(df) >= 14:
+                            df['RSI'] = ta.rsi(df['Close'], 14)
+                            df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
+                            curr_rsi = df['RSI'].iloc[-1]
+                            curr_adx = df['ADX'].iloc[-1]
+                        else:
+                            curr_rsi = 0.0
+                            curr_adx = 0.0
+
+                        if len(df) >= 5:
+                            df['EMA'] = ta.ema(df['Close'], 5)
+                            mom = round(((df['Close'].iloc[-1] - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
+                        else:
+                            mom = 0.0
+
+                        # Price Data (Available even with 1 candle)
+                        curr = df.iloc[-1]
                         ltp = curr['Close']
-                        p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
-                        o_chg = round(((curr['OI'] - prev['OI'])/prev['OI'])*100, 2) if prev['OI'] > 0 else 0
+                        
+                        if len(df) > 1:
+                            prev = df.iloc[-2]
+                            p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
+                            o_chg = round(((curr['OI'] - prev['OI'])/prev['OI'])*100, 2) if prev['OI'] > 0 else 0
+                        else:
+                            p_chg = 0.0
+                            o_chg = 0.0
+                            
                         sent = get_oi_analysis(p_chg, o_chg)
-                        mom = round(((ltp - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
                         
                         row = {
                             "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
                             "LTP": round(ltp, 2), "Mom %": mom, "Price Chg%": p_chg,
-                            "RSI": round(curr['RSI'], 1), "ADX": round(curr['ADX'], 1),
+                            "RSI": round(curr_rsi, 1), "ADX": round(curr_adx, 1),
                             "OI Chg%": o_chg, "Analysis": sent
                         }
                         
                         r_m = row.copy(); r_m['Sort'] = sym
                         all_data.append(r_m)
                         
-                        if p_chg > 0.5 and row['RSI'] > 60 and row['ADX'] > 20: bull.append(row)
-                        elif p_chg < -0.5 and row['RSI'] < 45 and row['ADX'] > 20: bear.append(row)
+                        # Only add to Bulls/Bears if RSI is valid (non-zero)
+                        if curr_rsi > 0:
+                            if p_chg > 0.5 and curr_rsi > 60 and curr_adx > 20: bull.append(row)
+                            elif p_chg < -0.5 and curr_rsi < 45 and curr_adx > 20: bear.append(row)
         except: pass
         
-        # Safe Delay
         time.sleep(0.15) 
         bar.progress((i+1)/len(targets))
     
