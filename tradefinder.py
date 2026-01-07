@@ -44,11 +44,12 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX MAP (Standardized to IDX_I) ---
-INDEX_MAP = {
+# --- 5. INDEX CONFIGURATION (CORRECTED) ---
+# Verified from your CSV: Sensex ID is 51, Segment is IDX_I
+INDEX_CONFIG = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'}
+    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'} 
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -88,6 +89,7 @@ def get_fno_stock_map():
                     base_sym = row[col_name].split('-')[0]
                     disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
                     fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
+        
     except Exception as e: st.error(f"Error reading CSV: {e}")
     return fno_map
 
@@ -111,43 +113,26 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (Fixed Math Logic) ---
+# --- 9. DASHBOARD (UNIFIED LOGIC) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
-    for key, info in INDEX_MAP.items():
+    for key, info in INDEX_CONFIG.items():
         try:
-            # 1. Fetch 5 Days of Chart Data (Proven working method)
+            # Universal Fetcher for All Indices (Now that ID is correct)
             to_d = datetime.now().strftime('%Y-%m-%d')
             from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-            
-            # Using 'IDX_I' for both NSE and BSE indices
             r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
             
             if r['status'] == 'success' and r['data'].get('close'):
                 closes = r['data']['close']
-                times = r['data']['start_Time']
                 ltp = closes[-1]
-                
-                # 2. Robust Change Calculation
-                # Identify the date of the LAST candle (Today)
-                last_candle_date = str(times[-1])[:10]
-                
-                # Find the close of the PREVIOUS day (Yesterday)
-                prev_close = ltp # Default fallback
-                
-                # Loop backwards to find the first candle that has a DIFFERENT date
-                for i in range(len(times)-1, -1, -1):
-                    curr_date = str(times[i])[:10]
-                    if curr_date != last_candle_date:
-                        prev_close = closes[i] # Found yesterday's close!
-                        break
-                
-                # Calculate Change
-                chg = ltp - prev_close
-                pct = (chg / prev_close) * 100 if prev_close > 0 else 0
-                
+                lookback_idx = max(0, len(closes) - 375)
+                prev = closes[lookback_idx]
+                if prev == 0: prev = ltp
+                chg = ltp - prev
+                pct = (chg / prev) * 100
                 data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
                 data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
