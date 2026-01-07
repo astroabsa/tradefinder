@@ -8,8 +8,7 @@ import time
 import os
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
-IST = pytz.timezone('Asia/Kolkata') # Force IST Timezone
+st.set_page_config(page_title="Absa's Auto-Watchlist Scanner", layout="wide")
 
 # --- 2. AUTHENTICATION ---
 AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
@@ -25,7 +24,7 @@ def authenticate_user(user_in, pw_in):
 
 if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
 if not st.session_state["authenticated"]:
-    st.title("🔐 Absa's F&O Pro Login")
+    st.title("🔐 Absa's Pro Login")
     with st.form("login_form"):
         u = st.text_input("Username"); p = st.text_input("Password", type="password")
         if st.form_submit_button("Log In"):
@@ -34,7 +33,7 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN UI ---
-st.title("🚀 Absa's Live F&O Screener Pro")
+st.title("🚀 Absa's Auto-Watchlist Scanner")
 if st.sidebar.button("Log out"): st.session_state["authenticated"] = False; st.rerun()
 
 # --- 4. API CONNECTION ---
@@ -45,126 +44,94 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX MAP (Standardized) ---
-INDEX_MAP = {
-    'NIFTY': {'id': '13', 'name': 'NIFTY 50'}, 
-    'BANKNIFTY': {'id': '25', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51', 'name': 'SENSEX'}
+# --- 5. INDEX CONFIGURATION ---
+INDEX_CONFIG = {
+    'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
+    'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
+    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'} 
 }
 
-# --- 6. MASTER LIST LOADER ---
-@st.cache_data(ttl=3600*4)
-def get_fno_stock_map():
-    fno_map = {}
-    if not os.path.exists("dhan_master.csv"):
-        st.error("❌ 'dhan_master.csv' NOT FOUND."); return fno_map 
+# --- 6. REPOSITORY WATCHLIST LOADER ---
+def get_repo_watchlist():
+    watchlist = {}
+    # The file must be named exactly this and placed in your repo folder
+    file_path = "stock_watchlist.xlsx" 
+    
+    if os.path.exists(file_path):
+        try:
+            df = pd.read_excel(file_path)
+            # Normalize column names
+            df.columns = df.columns.str.lower().str.strip()
+            
+            if 'symbol' in df.columns and 'id' in df.columns:
+                st.sidebar.success(f"✅ Loaded {len(df)} Stocks from Repo")
+                for index, row in df.iterrows():
+                    sym = str(row['symbol']).upper().strip()
+                    sid = str(row['id']).strip()
+                    watchlist[sym] = {'id': sid, 'name': sym}
+            else:
+                st.error(f"❌ Error: '{file_path}' must have columns named 'Symbol' and 'ID'.")
+        except Exception as e:
+            st.error(f"❌ Error reading '{file_path}': {e}")
+    else:
+        st.warning(f"⚠️ File not found: **{file_path}**")
+        st.info("Please upload 'stock_watchlist.xlsx' to your GitHub repository/folder.")
+            
+    return watchlist
 
+FNO_MAP = get_repo_watchlist()
+
+# --- 7. DATA FETCHING ---
+def fetch_futures_data(security_id, interval=60):
     try:
-        df = pd.read_csv("dhan_master.csv", on_bad_lines='skip', low_memory=False)
-        df.columns = df.columns.str.strip() 
-        
-        col_exch = 'SEM_EXM_EXCH_ID'
-        col_id = 'SEM_SMST_SECURITY_ID'
-        col_name = 'SEM_TRADING_SYMBOL'
-        col_inst = 'SEM_INSTRUMENT_NAME'
-        col_expiry = 'SEM_EXPIRY_DATE'
-        
-        if col_name in df.columns: df[col_name] = df[col_name].astype(str).str.upper().str.strip()
-        if col_exch in df.columns: df[col_exch] = df[col_exch].astype(str).str.strip()
-        if col_inst in df.columns: df[col_inst] = df[col_inst].astype(str).str.strip()
-        
-        if col_exch in df.columns and col_inst in df.columns:
-            stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
-            
-            if col_expiry in stk_df.columns:
-                stk_df[col_expiry] = stk_df[col_expiry].astype(str)
-                stk_df['dt_parsed'] = pd.to_datetime(stk_df[col_expiry], dayfirst=True, errors='coerce')
-                
-                today = pd.Timestamp.now().normalize()
-                valid_futures = stk_df[stk_df['dt_parsed'] >= today]
-                valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
-                curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
-                
-                for _, row in curr_stk.iterrows():
-                    base_sym = row[col_name].split('-')[0]
-                    disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
-                    fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
-    except Exception as e: st.error(f"Error reading CSV: {e}")
-    return fno_map
+        to_date = datetime.now().strftime('%Y-%m-%d')
+        from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+        res = dhan.intraday_minute_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date, interval)
+        return res
+    except Exception as e: return {"status": "failure", "remarks": str(e)}
 
-with st.spinner("Loading Stock List..."):
-    FNO_MAP = get_fno_stock_map()
-
-# --- 7. HELPER: GET YESTERDAY'S CLOSE (The "Simple" Way) ---
-def get_prev_close(security_id):
-    try:
-        # Fetch last 10 days of DAILY candles. The API handles the "Daily" logic.
-        to_d = datetime.now(IST).strftime('%Y-%m-%d')
-        from_d = (datetime.now(IST) - timedelta(days=10)).strftime('%Y-%m-%d')
-        
-        # IDX_I works for all indices (NSE & BSE)
-        res = dhan.historical_daily_data(str(security_id), "IDX_I", "INDEX", from_d, to_d)
-        
-        if res['status'] == 'success' and 'data' in res:
-            df = pd.DataFrame(res['data'])
-            if df.empty: return 0.0
-            
-            # Helper to get date string
-            time_col = 'start_Time' if 'start_Time' in df.columns else 'timestamp'
-            df['date_str'] = df[time_col].astype(str).str[:10]
-            
-            # Filter out "Today" to find the last completed day
-            today_str = datetime.now(IST).strftime('%Y-%m-%d')
-            past_df = df[df['date_str'] != today_str]
-            
-            if not past_df.empty:
-                return float(past_df.iloc[-1]['close'])
-                
-    except: pass
-    return 0.0
-
-# --- 8. HELPER: GET LIVE PRICE (The "Simple" Way) ---
-def get_live_price(security_id):
-    try:
-        # Intraday chart for just today/yesterday gives the absolute latest price
-        to_d = datetime.now(IST).strftime('%Y-%m-%d')
-        from_d = (datetime.now(IST) - timedelta(days=3)).strftime('%Y-%m-%d')
-        
-        res = dhan.intraday_minute_data(str(security_id), "IDX_I", "INDEX", from_d, to_d, 1)
-        
-        if res['status'] == 'success' and 'data' in res:
-            closes = res['data']['close']
-            if len(closes) > 0:
-                return float(closes[-1])
-    except: pass
-    return 0.0
+# --- 8. ANALYSIS LOGIC ---
+def get_trend_analysis(price_chg, vol_ratio):
+    if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
+    if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
+    if price_chg > 0: return "Mild Bullish ↗️"
+    if price_chg < 0: return "Mild Bearish ↘️"
+    return "Neutral ⚪"
 
 # --- 9. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
-    for key, info in INDEX_MAP.items():
-        sid = info['id']
-        
-        # 1. Direct API call for Yesterday
-        prev = get_prev_close(sid)
-        
-        # 2. Direct API call for Today
-        ltp = get_live_price(sid)
-        
-        # 3. Simple Math
-        if ltp == 0: ltp = prev # Fallback if live fetch fails
-        if prev == 0: prev = ltp # Fallback if history fetch fails
-        
-        chg = 0.0
-        pct = 0.0
-        
-        if prev > 0:
-            chg = ltp - prev
-            pct = (chg / prev) * 100
+    for key, info in INDEX_CONFIG.items():
+        try:
+            to_d = datetime.now().strftime('%Y-%m-%d')
+            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
             
-        data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+            if r['status'] == 'success' and r['data'].get('close'):
+                closes = r['data']['close']
+                times = r['data']['start_Time']
+                ltp = closes[-1]
+                
+                # Logic: Find Yesterday's Close
+                last_date_str = str(times[-1])[:10]
+                prev = closes[0] 
+                
+                for i in range(len(times)-2, -1, -1):
+                    curr_date_str = str(times[i])[:10]
+                    if curr_date_str != last_date_str:
+                        prev = closes[i]
+                        break
+                
+                if prev == 0: prev = ltp
+                chg = ltp - prev
+                pct = (chg / prev) * 100
+                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+            else:
+                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+        except: 
+            data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.2])
     with c1: d=data.get("NIFTY 50"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
@@ -178,33 +145,25 @@ def refreshable_dashboard():
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
 # --- 10. SCANNER ---
-def get_trend_analysis(price_chg, vol_ratio):
-    if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
-    if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
-    if price_chg > 0: return "Mild Bullish ↗️"
-    if price_chg < 0: return "Mild Bearish ↘️"
-    return "Neutral ⚪"
-
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
-    st.caption(f"Scanning {len(FNO_MAP)} symbols... (Updates every 3 mins)")
+    
+    targets = list(FNO_MAP.keys())
+    if not targets:
+        st.warning("⚠️ Scanner paused. Waiting for 'stock_watchlist.xlsx'...")
+        return
+
+    st.caption(f"Scanning {len(targets)} Repo Symbols... (Updates every 3 mins)")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
-    targets = list(FNO_MAP.keys())
-    if not targets: st.warning("Scanner paused: No symbols found."); return
-
     bar = st.progress(0)
     bull, bear, all_data = [], [], []
 
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
-            
-            # Simple Intraday Fetch for Stocks
-            to_d = datetime.now(IST).strftime('%Y-%m-%d')
-            from_d = (datetime.now(IST) - timedelta(days=5)).strftime('%Y-%m-%d')
-            res = dhan.intraday_minute_data(str(sid), "NSE_FNO", "FUTSTK", from_d, to_d, 60)
+            res = fetch_futures_data(sid, interval=60)
             
             if res['status'] == 'success':
                 raw_data = res['data']
@@ -290,7 +249,7 @@ def refreshable_scanner():
             st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
         else: st.warning("No data found.")
 
-    st.write(f"🕒 **Last Data Sync:** {datetime.now(IST).strftime('%H:%M:%S')} IST")
+    st.write(f"🕒 **Last Data Sync:** {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} IST")
     st.markdown("<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
 
 if dhan: refreshable_dashboard(); refreshable_scanner()
