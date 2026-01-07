@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import time
 import os
 
-# --- 1. APP CONFIGURATION ---
+# --- 1. CONFIG ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
 
 # --- 2. AUTHENTICATION ---
@@ -32,11 +32,11 @@ if not st.session_state["authenticated"]:
             else: st.error("Invalid Credentials")
     st.stop()
 
-# --- 3. MAIN APP START ---
+# --- 3. MAIN START ---
 st.title("🚀 Absa's Live F&O Screener Pro")
 if st.sidebar.button("Log out"): st.session_state["authenticated"] = False; st.rerun()
 
-# --- 4. DHAN API ---
+# --- 4. API CONNECTION ---
 dhan = None
 try:
     client_id = st.secrets["DHAN_CLIENT_ID"]
@@ -44,24 +44,23 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. HARDCODED INDEX MAP ---
+# --- 5. INDEX MAP ---
 INDEX_MAP = {'NIFTY': '13', 'BANKNIFTY': '25', 'SENSEX': '51206'}
 
-# --- 6. ROBUST MASTER LIST LOADER ---
+# --- 6. MASTER LIST LOADER ---
 @st.cache_data(ttl=3600*4)
 def get_fno_stock_map():
     fno_map = {}
     if not os.path.exists("dhan_master.csv"):
-        st.error("❌ 'dhan_master.csv' NOT FOUND. Please upload it.")
-        return fno_map 
+        st.error("❌ 'dhan_master.csv' NOT FOUND."); return fno_map 
 
     try:
         df = pd.read_csv("dhan_master.csv", on_bad_lines='skip', low_memory=False)
         df.columns = df.columns.str.strip() 
         
-        # DEBUGGER
-        st.sidebar.markdown("### 🛠️ CSV Debugger")
-        st.sidebar.info(f"Total Rows: {len(df)}")
+        # --- SIDEBAR DEBUGGER ---
+        st.sidebar.markdown("### 🛠️ Data Debugger")
+        st.sidebar.info(f"Total Rows in CSV: {len(df)}")
         
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
@@ -75,7 +74,7 @@ def get_fno_stock_map():
         
         if col_exch in df.columns and col_inst in df.columns:
             stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
-            st.sidebar.info(f"NSE Futures: {len(stk_df)}")
+            st.sidebar.info(f"NSE Futures Rows: {len(stk_df)}")
             
             if col_expiry in stk_df.columns:
                 stk_df[col_expiry] = stk_df[col_expiry].astype(str)
@@ -85,12 +84,17 @@ def get_fno_stock_map():
                 valid_futures = stk_df[stk_df['dt_parsed'] >= today]
                 st.sidebar.success(f"Active Futures: {len(valid_futures)}")
                 
+                # --- VISUAL PROOF FOR USER ---
+                if len(valid_futures) > 0:
+                    st.sidebar.write("👇 **First 5 Symbols Found:**")
+                    st.sidebar.code("\n".join(valid_futures[col_name].head(5).tolist()))
+                    st.sidebar.warning("If these look like '011NSETEST...', your CSV contains garbage data.")
+
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
                 curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
                 
                 for _, row in curr_stk.iterrows():
                     base_sym = row[col_name].split('-')[0]
-                    # REMOVED THE "isdigit()" FILTER so it accepts '011NSETEST'
                     disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
                     fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
         
@@ -196,8 +200,7 @@ def refreshable_scanner():
                 if p_chg > 0.5 and row['RSI'] > 60 and row['ADX'] > 20: bull.append(row)
                 elif p_chg < -0.5 and row['RSI'] < 45 and row['ADX'] > 20: bear.append(row)
         except: pass
-        # Added sleep to prevent API blocking since you are scanning many test symbols
-        time.sleep(0.05) 
+        time.sleep(0.02)
         bar.progress((i+1)/len(targets))
     
     bar.empty()
@@ -216,7 +219,7 @@ def refreshable_scanner():
             
     with tab2:
         if all_data: st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
-        else: st.warning("No data.")
+        else: st.warning("No data found for the symbols in your list (likely because they are Test symbols).")
 
     st.write(f"🕒 **Last Data Sync:** {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} IST")
     st.markdown("<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
