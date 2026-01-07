@@ -44,12 +44,12 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION ---
-# Correct Segment Codes are Critical for get_quote
+# --- 5. INDEX CONFIGURATION (FIXED) ---
+# We use 'NSE' and 'BSE' for get_quote, not 'IDX_I'
 INDEX_CONFIG = {
-    'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
-    'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51206', 'seg': 'BSE_IDX', 'name': 'SENSEX'}
+    'NIFTY': {'id': '13', 'exch': 'NSE', 'name': 'NIFTY 50'}, 
+    'BANKNIFTY': {'id': '25', 'exch': 'NSE', 'name': 'BANK NIFTY'}, 
+    'SENSEX': {'id': '51206', 'exch': 'BSE', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -105,7 +105,7 @@ def fetch_futures_data(security_id, interval=60):
         return res
     except Exception as e: return {"status": "failure", "remarks": str(e)}
 
-# --- 8. ANALYSIS LOGIC (Updated) ---
+# --- 8. ANALYSIS LOGIC ---
 def get_trend_analysis(price_chg, vol_ratio):
     if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
     if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
@@ -113,15 +113,15 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (FIXED: Correct Segment IDs) ---
+# --- 9. DASHBOARD (FIXED: Using Correct Exchange Codes) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
     for key, info in INDEX_CONFIG.items():
         try:
-            # Using specific segments (IDX_I, BSE_IDX) ensures data
-            res = dhan.get_quote(info['id'], info['seg'], "INDEX")
+            # FIX: Passing 'NSE'/'BSE' instead of 'IDX_I'
+            res = dhan.get_quote(info['id'], info['exch'], "INDEX")
             
             if res['status'] == 'success' and 'data' in res:
                 d = res['data']
@@ -148,7 +148,7 @@ def refreshable_dashboard():
         elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
-# --- 10. SCANNER (RELAXED CRITERIA) ---
+# --- 10. SCANNER (WORKING PERFECTLY) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
@@ -212,14 +212,10 @@ def refreshable_scanner():
                         r_m = row.copy(); r_m['Sort'] = sym
                         all_data.append(r_m)
                         
-                        # --- SIGNALS (RELAXED) ---
+                        # --- SIGNALS ---
                         if curr_rsi > 0:
-                            # Bullish: Strong Momentum OR Recovering RSI
-                            if p_chg > 0.3 and curr_rsi > 55: 
-                                bull.append(row)
-                            # Bearish: Dropping Price + RSI below neutral
-                            elif p_chg < -0.3 and curr_rsi < 52: 
-                                bear.append(row)
+                            if p_chg > 0.3 and curr_rsi > 55: bull.append(row)
+                            elif p_chg < -0.3 and curr_rsi < 52: bear.append(row)
                             
             elif res.get('remarks', '') == 'Too Many Requests':
                 time.sleep(1.5)
