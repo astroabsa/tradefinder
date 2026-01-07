@@ -60,7 +60,7 @@ def get_fno_stock_map():
         
         # --- SIDEBAR DEBUGGER ---
         st.sidebar.markdown("### 🛠️ Data Debugger")
-        st.sidebar.info(f"Total Rows in CSV: {len(df)}")
+        st.sidebar.info(f"Total CSV Rows: {len(df)}")
         
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
@@ -74,7 +74,6 @@ def get_fno_stock_map():
         
         if col_exch in df.columns and col_inst in df.columns:
             stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
-            st.sidebar.info(f"NSE Futures Rows: {len(stk_df)}")
             
             if col_expiry in stk_df.columns:
                 stk_df[col_expiry] = stk_df[col_expiry].astype(str)
@@ -84,11 +83,9 @@ def get_fno_stock_map():
                 valid_futures = stk_df[stk_df['dt_parsed'] >= today]
                 st.sidebar.success(f"Active Futures: {len(valid_futures)}")
                 
-                # --- VISUAL PROOF FOR USER ---
                 if len(valid_futures) > 0:
-                    st.sidebar.write("👇 **First 5 Symbols Found:**")
+                    st.sidebar.write("👇 **Scanning These Symbols:**")
                     st.sidebar.code("\n".join(valid_futures[col_name].head(5).tolist()))
-                    st.sidebar.warning("If these look like '011NSETEST...', your CSV contains garbage data.")
 
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
                 curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
@@ -104,18 +101,28 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DATA FETCHING ---
-def fetch_futures_data(security_id, interval=60):
+# --- 7. DATA FETCHING (DEBUG MODE) ---
+def fetch_futures_data(security_id, interval=60, is_debug=False):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         res = dhan.intraday_minute_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date, interval)
+        
+        # DEBUG: Print first failure/success reason to sidebar
+        if is_debug:
+            if res['status'] == 'success':
+                data_count = len(res.get('data', {}).get('start_Time', []))
+                st.sidebar.success(f"✅ Test Fetch Success! Got {data_count} candles.")
+            else:
+                st.sidebar.error(f"❌ Test Fetch Failed: {res}")
+
         if res['status'] == 'success':
             df = pd.DataFrame(res['data'])
             if df.empty: return pd.DataFrame()
             df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
             return df
-    except: pass
+    except Exception as e:
+        if is_debug: st.sidebar.error(f"❌ API Exception: {e}")
     return pd.DataFrame()
 
 # --- 8. OI LOGIC ---
@@ -174,7 +181,11 @@ def refreshable_scanner():
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
-            df = fetch_futures_data(sid)
+            # DEBUG THE FIRST REQUEST
+            is_debug_req = (i == 0)
+            
+            df = fetch_futures_data(sid, interval=60, is_debug=is_debug_req)
+            
             if not df.empty and len(df) > 20:
                 df['RSI'] = ta.rsi(df['Close'], 14)
                 df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
@@ -200,7 +211,9 @@ def refreshable_scanner():
                 if p_chg > 0.5 and row['RSI'] > 60 and row['ADX'] > 20: bull.append(row)
                 elif p_chg < -0.5 and row['RSI'] < 45 and row['ADX'] > 20: bear.append(row)
         except: pass
-        time.sleep(0.02)
+        
+        # CRITICAL: Sleep to prevent Rate Limiting (429 Errors)
+        time.sleep(0.2) 
         bar.progress((i+1)/len(targets))
     
     bar.empty()
@@ -219,7 +232,7 @@ def refreshable_scanner():
             
     with tab2:
         if all_data: st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
-        else: st.warning("No data found for the symbols in your list (likely because they are Test symbols).")
+        else: st.warning("No data found for the symbols in your list (Check Sidebar for API Errors).")
 
     st.write(f"🕒 **Last Data Sync:** {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} IST")
     st.markdown("<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
