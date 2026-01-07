@@ -9,6 +9,7 @@ import os
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
+IST = pytz.timezone('Asia/Kolkata') # Force IST Timezone
 
 # --- 2. AUTHENTICATION ---
 AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
@@ -44,11 +45,11 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION ---
-INDEX_CONFIG = {
-    'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
-    'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'} 
+# --- 5. INDEX MAP (Standardized) ---
+INDEX_MAP = {
+    'NIFTY': {'id': '13', 'name': 'NIFTY 50'}, 
+    'BANKNIFTY': {'id': '25', 'name': 'BANK NIFTY'}, 
+    'SENSEX': {'id': '51', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -88,71 +89,82 @@ def get_fno_stock_map():
                     base_sym = row[col_name].split('-')[0]
                     disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
                     fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
-        
     except Exception as e: st.error(f"Error reading CSV: {e}")
     return fno_map
 
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DATA FETCHING ---
-def fetch_futures_data(security_id, interval=60):
+# --- 7. HELPER: GET YESTERDAY'S CLOSE (The "Simple" Way) ---
+def get_prev_close(security_id):
     try:
-        to_date = datetime.now().strftime('%Y-%m-%d')
-        from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-        res = dhan.intraday_minute_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date, interval)
-        return res
-    except Exception as e: return {"status": "failure", "remarks": str(e)}
+        # Fetch last 10 days of DAILY candles. The API handles the "Daily" logic.
+        to_d = datetime.now(IST).strftime('%Y-%m-%d')
+        from_d = (datetime.now(IST) - timedelta(days=10)).strftime('%Y-%m-%d')
+        
+        # IDX_I works for all indices (NSE & BSE)
+        res = dhan.historical_daily_data(str(security_id), "IDX_I", "INDEX", from_d, to_d)
+        
+        if res['status'] == 'success' and 'data' in res:
+            df = pd.DataFrame(res['data'])
+            if df.empty: return 0.0
+            
+            # Helper to get date string
+            time_col = 'start_Time' if 'start_Time' in df.columns else 'timestamp'
+            df['date_str'] = df[time_col].astype(str).str[:10]
+            
+            # Filter out "Today" to find the last completed day
+            today_str = datetime.now(IST).strftime('%Y-%m-%d')
+            past_df = df[df['date_str'] != today_str]
+            
+            if not past_df.empty:
+                return float(past_df.iloc[-1]['close'])
+                
+    except: pass
+    return 0.0
 
-# --- 8. ANALYSIS LOGIC ---
-def get_trend_analysis(price_chg, vol_ratio):
-    if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
-    if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
-    if price_chg > 0: return "Mild Bullish ↗️"
-    if price_chg < 0: return "Mild Bearish ↘️"
-    return "Neutral ⚪"
+# --- 8. HELPER: GET LIVE PRICE (The "Simple" Way) ---
+def get_live_price(security_id):
+    try:
+        # Intraday chart for just today/yesterday gives the absolute latest price
+        to_d = datetime.now(IST).strftime('%Y-%m-%d')
+        from_d = (datetime.now(IST) - timedelta(days=3)).strftime('%Y-%m-%d')
+        
+        res = dhan.intraday_minute_data(str(security_id), "IDX_I", "INDEX", from_d, to_d, 1)
+        
+        if res['status'] == 'success' and 'data' in res:
+            closes = res['data']['close']
+            if len(closes) > 0:
+                return float(closes[-1])
+    except: pass
+    return 0.0
 
-# --- 9. DASHBOARD (FIXED MATH LOGIC) ---
+# --- 9. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
-    for key, info in INDEX_CONFIG.items():
-        try:
-            # We use the method that we KNOW works for you (Intraday Charts)
-            to_d = datetime.now().strftime('%Y-%m-%d')
-            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+    for key, info in INDEX_MAP.items():
+        sid = info['id']
+        
+        # 1. Direct API call for Yesterday
+        prev = get_prev_close(sid)
+        
+        # 2. Direct API call for Today
+        ltp = get_live_price(sid)
+        
+        # 3. Simple Math
+        if ltp == 0: ltp = prev # Fallback if live fetch fails
+        if prev == 0: prev = ltp # Fallback if history fetch fails
+        
+        chg = 0.0
+        pct = 0.0
+        
+        if prev > 0:
+            chg = ltp - prev
+            pct = (chg / prev) * 100
             
-            if r['status'] == 'success' and r['data'].get('close'):
-                closes = r['data']['close']
-                times = r['data']['start_Time']
-                ltp = closes[-1]
-                
-                # --- SURGICAL FIX FOR "CHANGE %" ---
-                # Old Logic: prev = closes[max(0, len(closes) - 375)]  <-- This was causing the sync error
-                
-                # New Logic: Find the actual last candle of yesterday
-                # 1. Get today's date from the last candle
-                last_date_str = str(times[-1])[:10]
-                
-                prev = closes[0] # Default to first available candle if yesterday not found
-                
-                # 2. Walk backwards to find the first candle with a DIFFERENT date
-                for i in range(len(times)-2, -1, -1):
-                    curr_date_str = str(times[i])[:10]
-                    if curr_date_str != last_date_str:
-                        prev = closes[i] # This is yesterday's close
-                        break
-                
-                if prev == 0: prev = ltp
-                chg = ltp - prev
-                pct = (chg / prev) * 100
-                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-            else:
-                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
-        except: 
-            data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+        data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
 
     c1, c2, c3, c4 = st.columns([1,1,1,1.2])
     with c1: d=data.get("NIFTY 50"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
@@ -166,6 +178,13 @@ def refreshable_dashboard():
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
 # --- 10. SCANNER ---
+def get_trend_analysis(price_chg, vol_ratio):
+    if price_chg > 0 and vol_ratio > 1.2: return "Bullish (Vol) 🟢"
+    if price_chg < 0 and vol_ratio > 1.2: return "Bearish (Vol) 🔴"
+    if price_chg > 0: return "Mild Bullish ↗️"
+    if price_chg < 0: return "Mild Bearish ↘️"
+    return "Neutral ⚪"
+
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
@@ -181,7 +200,11 @@ def refreshable_scanner():
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
-            res = fetch_futures_data(sid, interval=60)
+            
+            # Simple Intraday Fetch for Stocks
+            to_d = datetime.now(IST).strftime('%Y-%m-%d')
+            from_d = (datetime.now(IST) - timedelta(days=5)).strftime('%Y-%m-%d')
+            res = dhan.intraday_minute_data(str(sid), "NSE_FNO", "FUTSTK", from_d, to_d, 60)
             
             if res['status'] == 'success':
                 raw_data = res['data']
@@ -267,7 +290,7 @@ def refreshable_scanner():
             st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
         else: st.warning("No data found.")
 
-    st.write(f"🕒 **Last Data Sync:** {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} IST")
+    st.write(f"🕒 **Last Data Sync:** {datetime.now(IST).strftime('%H:%M:%S')} IST")
     st.markdown("<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
 
 if dhan: refreshable_dashboard(); refreshable_scanner()
