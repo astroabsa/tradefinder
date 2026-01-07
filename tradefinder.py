@@ -119,7 +119,7 @@ def refreshable_dashboard():
     
     for key, info in INDEX_CONFIG.items():
         try:
-            # Using CHART Data (Proven to work for LTP)
+            # We use the method that we KNOW works for you (Intraday Charts)
             to_d = datetime.now().strftime('%Y-%m-%d')
             from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
             r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
@@ -129,22 +129,25 @@ def refreshable_dashboard():
                 times = r['data']['start_Time']
                 ltp = closes[-1]
                 
-                # --- NEW LOGIC: FIND YESTERDAY'S CLOSE CORRECTLY ---
-                # 1. Identify Today's Date from the last candle
+                # --- SURGICAL FIX FOR "CHANGE %" ---
+                # Old Logic: prev = closes[max(0, len(closes) - 375)]  <-- This was causing the sync error
+                
+                # New Logic: Find the actual last candle of yesterday
+                # 1. Get today's date from the last candle
                 last_date_str = str(times[-1])[:10]
                 
-                # 2. Loop backwards to find the first candle with a DIFFERENT date
-                prev_close = ltp # Default fallback
+                prev = closes[0] # Default to first available candle if yesterday not found
+                
+                # 2. Walk backwards to find the first candle with a DIFFERENT date
                 for i in range(len(times)-2, -1, -1):
                     curr_date_str = str(times[i])[:10]
                     if curr_date_str != last_date_str:
-                        prev_close = closes[i] # Found it!
+                        prev = closes[i] # This is yesterday's close
                         break
                 
-                # 3. Calculate Change
-                if prev_close == 0: prev_close = ltp
-                chg = ltp - prev_close
-                pct = (chg / prev_close) * 100
+                if prev == 0: prev = ltp
+                chg = ltp - prev
+                pct = (chg / prev) * 100
                 data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
                 data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
