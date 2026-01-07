@@ -58,49 +58,53 @@ except Exception as e:
     st.stop()
 
 # --- 5. ROBUST MASTER LIST LOADER ---
+# --- 5. LOCAL MASTER LIST LOADER (STABLE VERSION) ---
 @st.cache_data(ttl=3600*4)
 def get_master_data_map():
     fno_map = {}
     index_map = {}
     
-    # Fail-safe defaults in case CSV fails completely
-    index_map['NIFTY'] = '13'       # Standard NSE ID
-    index_map['BANKNIFTY'] = '25'   # Standard NSE ID
+    # Hardcoded Defaults (Just in case)
+    index_map['NIFTY'] = '13'
+    index_map['BANKNIFTY'] = '25'
     
     try:
-        # FIX 1: Add User-Agent to prevent 403 Forbidden errors
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        url = "https://images.dhan.co/api-data/api-scrip-master.csv"
+        # 1. READ LOCAL FILE INSTEAD OF URL
+        # Make sure 'dhan_master.csv' is in the same folder as app.py
+        df = pd.read_csv("dhan_master.csv")
         
-        r = requests.get(url, headers=headers)
-        r.raise_for_status() # Check for download errors
+        # Clean column names (strip spaces)
+        df.columns = df.columns.str.strip()
         
-        df = pd.read_csv(io.StringIO(r.content.decode('utf-8')))
-        df.columns = df.columns.str.strip() # Fix whitespace in headers
-        
-        # FIX 2: Smart Column Detection (Handle format changes)
-        col_exch = 'SEM_EXM_EXCH_ID' if 'SEM_EXM_EXCH_ID' in df.columns else 'EXCH_ID'
-        col_id = 'SEM_SMST_SECURITY_ID' if 'SEM_SMST_SECURITY_ID' in df.columns else 'SECURITY_ID'
-        col_name = 'SEM_TRADING_SYMBOL' if 'SEM_TRADING_SYMBOL' in df.columns else 'TRADING_SYMBOL'
-        col_inst = 'SEM_INSTRUMENT_NAME' if 'SEM_INSTRUMENT_NAME' in df.columns else 'INSTRUMENT'
+        # 2. STANDARD COLUMNS (Dhan CSV format)
+        # We assume the standard names since you downloaded the official file
+        col_exch = 'SEM_EXM_EXCH_ID'
+        col_id = 'SEM_SMST_SECURITY_ID'
+        col_name = 'SEM_TRADING_SYMBOL'
+        col_inst = 'SEM_INSTRUMENT_NAME'
         
         # Normalize Symbols
         df[col_name] = df[col_name].astype(str).str.upper().str.strip()
         
-        # 1. Stocks Futures (FUTSTK)
+        # 3. FILTER LISTS
+        # Stocks Futures (FUTSTK)
         stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')]
         
-        # 2. Spot Indices (INDEX)
+        # Spot Indices (INDEX)
         idx_df = df[df[col_inst] == 'INDEX']
         
         # Helper to find nearest expiry
         def get_current_futures(dataframe):
-            # Try parsing expiry date
             if 'SEM_EXPIRY_DATE' in dataframe.columns:
+                # Parse Dates
                 dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
                 today = pd.Timestamp.now().normalize()
+                
+                # Filter Future Dates
                 valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
+                # Sort to find nearest
                 valid = valid.sort_values(by=[col_name, 'SEM_EXPIRY_DATE'])
+                # Pick nearest
                 return valid.drop_duplicates(subset=[col_name], keep='first')
             return dataframe
 
@@ -108,30 +112,25 @@ def get_master_data_map():
         curr_stk = get_current_futures(stk_df)
         for _, row in curr_stk.iterrows():
             base_sym = row[col_name].split('-')[0]
-            # Use Custom Symbol if available for cleaner display
             disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
             fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
             
-        # Process Spot Indices (Robust Name Match)
+        # Process Indices
         nifty = idx_df[(idx_df[col_exch] == 'NSE') & (idx_df[col_name] == 'NIFTY 50')]
         if not nifty.empty: index_map['NIFTY'] = str(nifty.iloc[0][col_id])
         
         bank = idx_df[(idx_df[col_exch] == 'NSE') & (idx_df[col_name].isin(['NIFTY BANK', 'BANKNIFTY']))]
         if not bank.empty: index_map['BANKNIFTY'] = str(bank.iloc[0][col_id])
         
-        # BSE SENSEX
         sensex = idx_df[(idx_df[col_exch] == 'BSE') & (idx_df[col_name].str.contains('SENSEX'))]
         if not sensex.empty: index_map['SENSEX'] = str(sensex.iloc[0][col_id])
 
+    except FileNotFoundError:
+        st.error("❌ 'dhan_master.csv' not found! Please upload the CSV to your app folder.")
     except Exception as e:
-        st.error(f"Master List Error: {e}. Using offline defaults for Dashboard.")
-        # We rely on the hardcoded defaults for Nifty/BankNifty so dashboard doesn't break
+        st.error(f"Master List Error: {e}")
     
     return fno_map, index_map
-
-with st.spinner("Syncing Master List..."):
-    FNO_MAP, INDEX_MAP = get_master_data_map()
-
 # --- 6. DATA FETCHING ---
 def fetch_futures_data(security_id, interval=60):
     try:
