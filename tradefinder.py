@@ -34,7 +34,7 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN UI ---
-st.title("🚀 Absa's Live F&O Screener Pro")
+st.title("🚀 iTW's Live F&O Screener Pro")
 if st.sidebar.button("Log out"): st.session_state["authenticated"] = False; st.rerun()
 
 # --- 4. API CONNECTION ---
