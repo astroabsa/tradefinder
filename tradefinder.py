@@ -58,10 +58,7 @@ def get_fno_stock_map():
         df = pd.read_csv("dhan_master.csv", on_bad_lines='skip', low_memory=False)
         df.columns = df.columns.str.strip() 
         
-        # --- SIDEBAR DEBUGGER ---
-        st.sidebar.markdown("### 🛠️ Data Debugger")
-        st.sidebar.info(f"Total CSV Rows: {len(df)}")
-        
+        # Standard Columns
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
         col_name = 'SEM_TRADING_SYMBOL'
@@ -74,7 +71,6 @@ def get_fno_stock_map():
         
         if col_exch in df.columns and col_inst in df.columns:
             stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
-            st.sidebar.info(f"NSE Futures Found: {len(stk_df)}")
             
             if col_expiry in stk_df.columns:
                 stk_df[col_expiry] = stk_df[col_expiry].astype(str)
@@ -82,10 +78,6 @@ def get_fno_stock_map():
                 
                 today = pd.Timestamp.now().normalize()
                 valid_futures = stk_df[stk_df['dt_parsed'] >= today]
-                
-                if len(valid_futures) > 0:
-                    st.sidebar.write("👇 **Scanning First 5 Symbols:**")
-                    st.sidebar.code("\n".join(valid_futures[col_name].head(5).tolist()))
 
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
                 curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
@@ -107,7 +99,7 @@ def fetch_futures_data(security_id, interval=60):
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         res = dhan.intraday_minute_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date, interval)
-        return res # Return FULL response for debugging
+        return res 
     except Exception as e: return {"status": "failure", "remarks": str(e)}
 
 # --- 8. OI LOGIC ---
@@ -157,14 +149,15 @@ def refreshable_dashboard():
 def refreshable_scanner():
     st.markdown("---")
     
-    st.info("🔍 **System Status:** Scanning has started. Check the X-Ray Debugger below.")
+    # Simple Status Indicator
+    st.caption(f"Scanning {len(FNO_MAP)} symbols... (Updates every 3 mins)")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     
     targets = list(FNO_MAP.keys())
     if not targets: st.warning("Scanner paused: No symbols found."); return
 
-    bar = st.progress(0, f"Scanning {len(targets)} Futures...")
+    bar = st.progress(0)
     bull, bear, all_data = [], [], []
 
     for i, sym in enumerate(targets):
@@ -172,51 +165,30 @@ def refreshable_scanner():
             sid = FNO_MAP[sym]['id']
             res = fetch_futures_data(sid, interval=60)
             
-            # --- X-RAY DEBUG ---
-            if i == 0:
-                with st.expander(f"🛠️ X-Ray Debug: Checking first symbol '{sym}' (ID: {sid})", expanded=True):
-                    st.write("Status:", res.get('status'))
-                    candle_count = len(res.get('data', {}).get('close', [])) if res.get('data') else 0
-                    st.write(f"Candles Found: {candle_count}")
-                    st.json(res) # Show Raw JSON to confirm keys
-
-            # Process Data
             if res['status'] == 'success':
                 raw_data = res['data']
                 if raw_data:
                     df = pd.DataFrame(raw_data)
-                    
-                    # FIX: Handle missing 'oi' and alternate time keys
-                    rename_map = {
-                        'start_Time':'datetime', 'timestamp':'datetime', # Handle both
-                        'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 
-                        'oi':'OI'
-                    }
+                    rename_map = {'start_Time':'datetime', 'timestamp':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}
                     df.rename(columns=rename_map, inplace=True)
                     
-                    # FIX: Inject missing 'OI' column with 0s if it doesn't exist
-                    if 'OI' not in df.columns:
-                        df['OI'] = 0
+                    if 'OI' not in df.columns: df['OI'] = 0
                     
                     if not df.empty and len(df) > 0:
                         
-                        # Safe Indicator Calculation
                         if len(df) >= 14:
                             df['RSI'] = ta.rsi(df['Close'], 14)
                             df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
                             curr_rsi = df['RSI'].iloc[-1]
                             curr_adx = df['ADX'].iloc[-1]
                         else:
-                            curr_rsi = 0.0
-                            curr_adx = 0.0
+                            curr_rsi = 0.0; curr_adx = 0.0
 
                         if len(df) >= 5:
                             df['EMA'] = ta.ema(df['Close'], 5)
                             mom = round(((df['Close'].iloc[-1] - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
-                        else:
-                            mom = 0.0
+                        else: mom = 0.0
 
-                        # Price Data (Available even with 1 candle)
                         curr = df.iloc[-1]
                         ltp = curr['Close']
                         
@@ -224,9 +196,7 @@ def refreshable_scanner():
                             prev = df.iloc[-2]
                             p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
                             o_chg = round(((curr['OI'] - prev['OI'])/prev['OI'])*100, 2) if prev['OI'] > 0 else 0
-                        else:
-                            p_chg = 0.0
-                            o_chg = 0.0
+                        else: p_chg = 0.0; o_chg = 0.0
                             
                         sent = get_oi_analysis(p_chg, o_chg)
                         
@@ -249,22 +219,34 @@ def refreshable_scanner():
         bar.progress((i+1)/len(targets))
     
     bar.empty()
-    cfg = {"Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)"), 
-           "OI Chg%": st.column_config.NumberColumn(format="%.2f%%"),
-           "Price Chg%": st.column_config.NumberColumn(format="%.2f%%")}
+    
+    # Optimized Column Configuration
+    cfg = {
+        "Symbol": st.column_config.LinkColumn("Script", display_text="symbol=NSE:(.*)", width="medium"),
+        "LTP": st.column_config.NumberColumn("LTP", format="%.2f"),
+        "Mom %": st.column_config.NumberColumn("Mom%", format="%.2f%%"),
+        "Price Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+        "RSI": st.column_config.NumberColumn("RSI", format="%.1f"),
+        "ADX": st.column_config.NumberColumn("ADX", format="%.1f"),
+        "OI Chg%": st.column_config.NumberColumn("OI%", format="%.2f%%"),
+        "Analysis": st.column_config.TextColumn("Analysis", width="medium")
+    }
     
     with tab1:
         c1, c2 = st.columns(2)
         with c1: 
             st.success(f"🟢 BULLS ({len(bull)})")
-            if bull: st.dataframe(pd.DataFrame(bull).sort_values("Mom %", ascending=False).head(15), use_container_width=True, hide_index=True, column_config=cfg)
+            if bull: st.dataframe(pd.DataFrame(bull).sort_values("Mom %", ascending=False).head(20), use_container_width=True, hide_index=True, column_config=cfg)
+            else: st.info("No Bullish setups.")
         with c2: 
             st.error(f"🔴 BEARS ({len(bear)})")
-            if bear: st.dataframe(pd.DataFrame(bear).sort_values("Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=cfg)
+            if bear: st.dataframe(pd.DataFrame(bear).sort_values("Mom %", ascending=True).head(20), use_container_width=True, hide_index=True, column_config=cfg)
+            else: st.info("No Bearish setups.")
             
     with tab2:
-        if all_data: st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
-        else: st.warning("No data found. Check the X-Ray Debugger at the top.")
+        if all_data: 
+            st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
+        else: st.warning("No data found.")
 
     st.write(f"🕒 **Last Data Sync:** {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} IST")
     st.markdown("<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
