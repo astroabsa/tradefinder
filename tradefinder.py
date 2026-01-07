@@ -45,7 +45,7 @@ try:
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
 # --- 5. INDEX CONFIGURATION (CORRECTED) ---
-# All Indices (NSE & BSE) live in the 'IDX_I' segment
+# Verified from your CSV: Sensex ID is 51, Segment is IDX_I
 INDEX_CONFIG = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
@@ -113,45 +113,29 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (HYBRID: Quote for Sensex, Charts for Nifty) ---
+# --- 9. DASHBOARD (UNIFIED LOGIC) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
     for key, info in INDEX_CONFIG.items():
         try:
-            # 1. SENSEX: Use 'get_quote' (Reliable for BSE)
-            if key == 'SENSEX':
-                res = dhan.get_quote(info['id'], info['seg'], "INDEX")
-                if res['status'] == 'success' and 'data' in res:
-                    d = res['data']
-                    ltp = d.get('last_price', 0.0)
-                    prev = d.get('previous_close', ltp)
-                    if prev == 0: prev = ltp
-                    chg = ltp - prev
-                    pct = (chg / prev) * 100
-                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-                else:
-                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            # Universal Fetcher for All Indices (Now that ID is correct)
+            to_d = datetime.now().strftime('%Y-%m-%d')
+            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
             
-            # 2. NIFTY/BANKNIFTY: Use Charts (Proven Working)
+            if r['status'] == 'success' and r['data'].get('close'):
+                closes = r['data']['close']
+                ltp = closes[-1]
+                lookback_idx = max(0, len(closes) - 375)
+                prev = closes[lookback_idx]
+                if prev == 0: prev = ltp
+                chg = ltp - prev
+                pct = (chg / prev) * 100
+                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
-                to_d = datetime.now().strftime('%Y-%m-%d')
-                from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-                r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
-                
-                if r['status'] == 'success' and r['data'].get('close'):
-                    closes = r['data']['close']
-                    ltp = closes[-1]
-                    lookback_idx = max(0, len(closes) - 375)
-                    prev = closes[lookback_idx]
-                    if prev == 0: prev = ltp
-                    chg = ltp - prev
-                    pct = (chg / prev) * 100
-                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-                else:
-                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
-                    
+                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
         except: 
             data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
