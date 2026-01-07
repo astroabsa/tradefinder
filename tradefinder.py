@@ -44,8 +44,7 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION (CORRECTED) ---
-# Verified from your CSV: Sensex ID is 51, Segment is IDX_I
+# --- 5. INDEX CONFIGURATION ---
 INDEX_CONFIG = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
@@ -89,7 +88,6 @@ def get_fno_stock_map():
                     base_sym = row[col_name].split('-')[0]
                     disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
                     fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
-        
     except Exception as e: st.error(f"Error reading CSV: {e}")
     return fno_map
 
@@ -113,29 +111,70 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (UNIFIED LOGIC) ---
-@st.fragment(run_every=5)
-def refreshable_dashboard():
-    data = {}
-    
+# --- 9. OFFICIAL CLOSE FETCHER (FIX FOR SYNC) ---
+@st.cache_data(ttl=3600*12) # Cache for 12 hours (Run once per day)
+def get_official_prev_closes():
+    closes = {}
     for key, info in INDEX_CONFIG.items():
         try:
-            # Universal Fetcher for All Indices (Now that ID is correct)
+            # Fetch 10 days of daily history
             to_d = datetime.now().strftime('%Y-%m-%d')
-            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+            from_d = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
             
-            if r['status'] == 'success' and r['data'].get('close'):
-                closes = r['data']['close']
-                ltp = closes[-1]
-                lookback_idx = max(0, len(closes) - 375)
-                prev = closes[lookback_idx]
-                if prev == 0: prev = ltp
-                chg = ltp - prev
-                pct = (chg / prev) * 100
-                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-            else:
-                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            # Using 'IDX_I' for all Indices
+            res = dhan.historical_daily_data(info['id'], info['seg'], "INDEX", from_d, to_d)
+            
+            if res['status'] == 'success' and 'data' in res:
+                df = pd.DataFrame(res['data'])
+                # Convert timestamp
+                if 'start_Time' in df.columns:
+                    df['date'] = pd.to_datetime(df['start_Time']).dt.normalize() # Remove time part
+                elif 'timestamp' in df.columns:
+                    df['date'] = pd.to_datetime(df['timestamp']).dt.normalize()
+                
+                # Get Yesterday's Close (Last row BEFORE today)
+                today = pd.Timestamp.now().normalize()
+                yesterday_df = df[df['date'] < today]
+                
+                if not yesterday_df.empty:
+                    closes[key] = float(yesterday_df.iloc[-1]['close'])
+                else:
+                    closes[key] = 0.0
+        except:
+            closes[key] = 0.0
+    return closes
+
+# --- 10. DASHBOARD (SYNCED) ---
+@st.fragment(run_every=5)
+def refreshable_dashboard():
+    # 1. Get Official Yesterday's Close (Cached)
+    prev_closes = get_official_prev_closes()
+    
+    data = {}
+    for key, info in INDEX_CONFIG.items():
+        try:
+            # 2. Get Live Price via Quote
+            res = dhan.get_quote(info['id'], info['seg'], "INDEX")
+            
+            ltp = 0.0
+            if res['status'] == 'success' and 'data' in res:
+                ltp = float(res['data'].get('last_price', 0.0))
+            
+            # 3. Calculate Accurate Change
+            official_prev = prev_closes.get(key, 0.0)
+            
+            # Fallback if cache failed (Use Quote's prev_close)
+            if official_prev == 0.0 and ltp > 0:
+                official_prev = float(res['data'].get('previous_close', ltp))
+
+            chg = 0.0
+            pct = 0.0
+            if ltp > 0 and official_prev > 0:
+                chg = ltp - official_prev
+                pct = (chg / official_prev) * 100
+                
+            data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+            
         except: 
             data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
@@ -150,7 +189,7 @@ def refreshable_dashboard():
         elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
-# --- 10. SCANNER ---
+# --- 11. SCANNER ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
