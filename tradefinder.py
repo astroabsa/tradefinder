@@ -44,11 +44,11 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION (Back to what worked) ---
-INDEX_CONFIG = {
+# --- 5. INDEX MAP ---
+INDEX_MAP = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51', 'seg': 'BSE_I', 'name': 'SENSEX'}
+    'SENSEX': {'id': '51206', 'seg': 'BSE_IDX', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -112,37 +112,49 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (REVERTED TO CHART DATA) ---
+# --- 9. DASHBOARD (HYBRID FIX) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
-    for key, info in INDEX_CONFIG.items():
+    for key, info in INDEX_MAP.items():
         try:
-            # We use intraday data because we know it works for you
-            to_d = datetime.now().strftime('%Y-%m-%d')
-            # Look back 5 days to ensure we find "Previous Close"
-            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+            # HYBRID LOGIC: 
+            # 1. Sensex uses 'get_quote' (Bypasses Chart issues)
+            # 2. Nifty/BankNifty use 'intraday_minute_data' (Proven to work)
             
-            # Using specific segments (IDX_I for NSE, BSE_IDX for Sensex)
-            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+            if key == 'SENSEX':
+                # Fetch Live Quote for Sensex
+                res = dhan.get_quote(info['id'], 'BSE', 'INDEX') # 'BSE' exchange code is critical
+                if res['status'] == 'success' and 'data' in res:
+                    d = res['data']
+                    ltp = d.get('last_price', 0.0)
+                    prev = d.get('previous_close', ltp)
+                    if prev == 0: prev = ltp
+                    chg = ltp - prev
+                    pct = (chg / prev) * 100
+                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+                else:
+                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
             
-            if r['status'] == 'success' and r['data'].get('close'):
-                closes = r['data']['close']
-                ltp = closes[-1]
-                
-                # Estimate Change: Compare to price ~1 day (375 mins) ago
-                # This is an approximation but it guarantees non-zero values
-                lookback_idx = max(0, len(closes) - 375)
-                prev = closes[lookback_idx]
-                
-                if prev == 0: prev = ltp
-                
-                chg = ltp - prev
-                pct = (chg / prev) * 100
-                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
-                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+                # Use Charts for Nifty/BankNifty (As per previous success)
+                to_d = datetime.now().strftime('%Y-%m-%d')
+                from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+                r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+                
+                if r['status'] == 'success' and r['data'].get('close'):
+                    closes = r['data']['close']
+                    ltp = closes[-1]
+                    lookback_idx = max(0, len(closes) - 375)
+                    prev = closes[lookback_idx]
+                    if prev == 0: prev = ltp
+                    chg = ltp - prev
+                    pct = (chg / prev) * 100
+                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+                else:
+                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+                    
         except: 
             data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
@@ -157,11 +169,11 @@ def refreshable_dashboard():
         elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
-# --- 10. SCANNER (WORKING) ---
+# --- 10. SCANNER ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
-    st.caption(f"Scanning {len(FNO_MAP)} symbols...")
+    st.caption(f"Scanning {len(FNO_MAP)} symbols... (Updates every 3 mins)")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     targets = list(FNO_MAP.keys())
@@ -183,7 +195,6 @@ def refreshable_scanner():
                     df.rename(columns=rename_map, inplace=True)
                     
                     if not df.empty and len(df) > 0:
-                        # Indicators
                         if len(df) >= 14:
                             df['RSI'] = ta.rsi(df['Close'], 14)
                             df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
@@ -196,7 +207,6 @@ def refreshable_scanner():
                             mom = round(((df['Close'].iloc[-1] - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
                         else: mom = 0.0
 
-                        # Volume Analysis
                         curr_vol = df['Volume'].iloc[-1]
                         avg_vol = df['Volume'].rolling(10).mean().iloc[-1] if len(df) > 10 else curr_vol
                         vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1.0
@@ -221,7 +231,6 @@ def refreshable_scanner():
                         r_m = row.copy(); r_m['Sort'] = sym
                         all_data.append(r_m)
                         
-                        # --- SIGNALS ---
                         if curr_rsi > 0:
                             if p_chg > 0.3 and curr_rsi > 55: bull.append(row)
                             elif p_chg < -0.3 and curr_rsi < 52: bear.append(row)
