@@ -198,13 +198,13 @@ def refreshable_scanner():
             # Simple Intraday Fetch for Stocks
             to_d = datetime.now(IST).strftime('%Y-%m-%d')
             from_d = (datetime.now(IST) - timedelta(days=5)).strftime('%Y-%m-%d')
-            res = dhan.intraday_minute_data(str(sid), "NSE_FNO", "FUTSTK", from_d, to_d, 60)
+            res = dhan.intraday_minute_data(str(sid), "NSE", "EQUITY", from_d, to_d, 60)
             
             if res['status'] == 'success':
                 raw_data = res['data']
                 if raw_data:
                     df = pd.DataFrame(raw_data)
-                    rename_map = {'start_Time':'datetime', 'timestamp':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}
+                    rename_map = {'start_Time':'datetime', 'timestamp':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume'}
                     df.rename(columns=rename_map, inplace=True)
                     
                     if not df.empty and len(df) > 0:
