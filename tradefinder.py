@@ -44,11 +44,11 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION ---
-INDEX_CONFIG = {
+# --- 5. INDEX MAP (Corrected IDs) ---
+INDEX_MAP = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'} 
+    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -111,70 +111,64 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. OFFICIAL CLOSE FETCHER (FIX FOR SYNC) ---
-@st.cache_data(ttl=3600*12) # Cache for 12 hours (Run once per day)
-def get_official_prev_closes():
-    closes = {}
-    for key, info in INDEX_CONFIG.items():
-        try:
-            # Fetch 10 days of daily history
-            to_d = datetime.now().strftime('%Y-%m-%d')
-            from_d = (datetime.now() - timedelta(days=15)).strftime('%Y-%m-%d')
-            
-            # Using 'IDX_I' for all Indices
-            res = dhan.historical_daily_data(info['id'], info['seg'], "INDEX", from_d, to_d)
-            
-            if res['status'] == 'success' and 'data' in res:
-                df = pd.DataFrame(res['data'])
-                # Convert timestamp
-                if 'start_Time' in df.columns:
-                    df['date'] = pd.to_datetime(df['start_Time']).dt.normalize() # Remove time part
-                elif 'timestamp' in df.columns:
-                    df['date'] = pd.to_datetime(df['timestamp']).dt.normalize()
-                
-                # Get Yesterday's Close (Last row BEFORE today)
-                today = pd.Timestamp.now().normalize()
-                yesterday_df = df[df['date'] < today]
-                
-                if not yesterday_df.empty:
-                    closes[key] = float(yesterday_df.iloc[-1]['close'])
-                else:
-                    closes[key] = 0.0
-        except:
-            closes[key] = 0.0
-    return closes
-
-# --- 10. DASHBOARD (SYNCED) ---
+# --- 9. DASHBOARD (HYBRID + CORRECT CHANGE MATH) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    # 1. Get Official Yesterday's Close (Cached)
-    prev_closes = get_official_prev_closes()
-    
     data = {}
-    for key, info in INDEX_CONFIG.items():
+    
+    for key, info in INDEX_MAP.items():
         try:
-            # 2. Get Live Price via Quote
-            res = dhan.get_quote(info['id'], info['seg'], "INDEX")
+            # 1. Sensex Logic (Use Quote for Price)
+            if key == 'SENSEX':
+                res = dhan.get_quote(info['id'], info['seg'], "INDEX")
+                if res['status'] == 'success' and 'data' in res:
+                    d = res['data']
+                    ltp = d.get('last_price', 0.0)
+                    # For Quote API, 'previous_close' is usually accurate
+                    prev = d.get('previous_close', ltp)
+                    if prev == 0: prev = ltp
+                    
+                    chg = ltp - prev
+                    pct = (chg / prev) * 100
+                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+                else:
+                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
             
-            ltp = 0.0
-            if res['status'] == 'success' and 'data' in res:
-                ltp = float(res['data'].get('last_price', 0.0))
-            
-            # 3. Calculate Accurate Change
-            official_prev = prev_closes.get(key, 0.0)
-            
-            # Fallback if cache failed (Use Quote's prev_close)
-            if official_prev == 0.0 and ltp > 0:
-                official_prev = float(res['data'].get('previous_close', ltp))
-
-            chg = 0.0
-            pct = 0.0
-            if ltp > 0 and official_prev > 0:
-                chg = ltp - official_prev
-                pct = (chg / official_prev) * 100
+            # 2. Nifty/BankNifty Logic (Use Charts for Price)
+            else:
+                to_d = datetime.now().strftime('%Y-%m-%d')
+                from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
+                r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
                 
-            data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-            
+                if r['status'] == 'success' and r['data'].get('close'):
+                    closes = r['data']['close']
+                    times = r['data']['start_Time'] # Get time to find "Yesterday"
+                    
+                    ltp = closes[-1]
+                    
+                    # --- SMART CHANGE CALCULATION ---
+                    # Create a mini DF to find yesterday's last candle easily
+                    df_mini = pd.DataFrame({'close': closes, 'time': times})
+                    df_mini['time'] = pd.to_datetime(df_mini['time'])
+                    # Normalize to date only
+                    df_mini['date'] = df_mini['time'].dt.normalize()
+                    
+                    today = pd.Timestamp.now().normalize()
+                    # Filter for rows strictly BEFORE today
+                    yesterday_data = df_mini[df_mini['date'] < today]
+                    
+                    if not yesterday_data.empty:
+                        # Official Close = Last candle of yesterday
+                        prev = yesterday_data.iloc[-1]['close']
+                    else:
+                        # Fallback (e.g. Monday morning looking for Friday)
+                        prev = closes[0] 
+
+                    chg = ltp - prev
+                    pct = (chg / prev) * 100
+                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+                else:
+                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
         except: 
             data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
@@ -189,7 +183,7 @@ def refreshable_dashboard():
         elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
-# --- 11. SCANNER ---
+# --- 10. SCANNER ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
