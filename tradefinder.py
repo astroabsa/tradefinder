@@ -73,7 +73,7 @@ def get_fno_stock_map():
                 try:
                     sym = str(row['SEM_TRADING_SYMBOL']).strip().upper()
                     raw_id = row['SEM_SMST_SECURITY_ID']
-                    # Clean ID to ensure it's a pure string digit
+                    # Clean ID
                     try: sid = str(int(float(raw_id))).strip()
                     except: sid = str(raw_id).strip()
                     fno_map[sym] = {'id': sid, 'name': sym}
@@ -86,25 +86,25 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. HELPER: DAILY DATA FETCH (Robust for After-Hours) ---
+# --- 7. HELPER: FETCH DAILY DATA (For Stocks) ---
 def fetch_daily_data(security_id):
     try:
-        # Fetch 60 days of daily history (Enough for EMA/RSI)
+        # Fetch 60 days to ensure we have enough history for RSI
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
         from_d = (datetime.now(IST) - timedelta(days=90)).strftime('%Y-%m-%d')
         
-        # Using "NSE", "EQUITY" as per your CSV type
+        # Using "NSE", "EQUITY" for stocks
         res = dhan.historical_daily_data(str(security_id), "NSE", "EQUITY", from_d, to_d)
         
         if res['status'] == 'success':
             data = res.get('data', {})
             if data:
                 df = pd.DataFrame(data)
-                # Standardize column names
+                # Standardize columns
                 if 'start_Time' in df.columns: df['datetime'] = df['start_Time']
                 elif 'timestamp' in df.columns: df['datetime'] = df['timestamp']
                 
-                # Ensure we have numeric columns
+                # Convert to numeric
                 cols = ['open', 'high', 'low', 'close', 'volume']
                 for c in cols: df[c] = pd.to_numeric(df[c])
                 
@@ -112,17 +112,61 @@ def fetch_daily_data(security_id):
     except: pass
     return pd.DataFrame()
 
-# --- 8. DASHBOARD ---
+# --- 8. HELPER: FETCH INTRADAY DATA (For Indices Dashboard) ---
+def fetch_index_data(security_id):
+    try:
+        to_d = datetime.now(IST).strftime('%Y-%m-%d')
+        from_d = (datetime.now(IST) - timedelta(days=5)).strftime('%Y-%m-%d')
+        # IDX_I works for indices
+        res = dhan.intraday_minute_data(str(security_id), "IDX_I", "INDEX", from_d, to_d, 60)
+        
+        if res['status'] == 'success' and 'data' in res:
+             return res['data']
+    except: pass
+    return {}
+
+# --- 9. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    # Simple dashboard logic (omitted for brevity, using placeholder logic if needed or keep existing)
-    # Keeping it simple as requested:
     data = {}
-    # (Reuse the robust dashboard logic from previous step or keep it minimal)
-    # For now, let's just show a static header to focus on the scanner fix
-    st.markdown("### 📊 Market Status (Daily)")
+    for key, info in INDEX_MAP.items():
+        sid = info['id']
+        # Fetch Data
+        raw = fetch_index_data(sid)
+        
+        ltp = 0.0; chg = 0.0; pct = 0.0
+        
+        if raw:
+            closes = raw.get('close', [])
+            times = raw.get('start_Time', [])
+            if closes:
+                ltp = closes[-1]
+                # Find Yesterday's Close logic
+                last_date_str = str(times[-1])[:10]
+                prev = closes[0]
+                for i in range(len(times)-2, -1, -1):
+                    if str(times[i])[:10] != last_date_str:
+                        prev = closes[i]
+                        break
+                
+                if prev == 0: prev = ltp
+                chg = ltp - prev
+                pct = (chg / prev) * 100
 
-# --- 9. SCANNER LOGIC ---
+        data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+
+    c1, c2, c3, c4 = st.columns([1,1,1,1.2])
+    with c1: d=data.get("NIFTY 50"); st.metric("NIFTY 50", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c2: d=data.get("BANK NIFTY"); st.metric("BANK NIFTY", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c3: d=data.get("SENSEX"); st.metric("SENSEX", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
+    with c4:
+        bias, color = ("SIDEWAYS ↔️", "gray")
+        nifty_pct = data.get("NIFTY 50", {}).get('pct', 0)
+        if nifty_pct > 0.25: bias, color = ("BULLISH 🚀", "green")
+        elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
+        st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
+
+# --- 10. SCANNER LOGIC ---
 def get_trend_analysis(price_chg, rsi, adx):
     if price_chg > 0 and rsi > 55 and adx > 20: return "Bullish 🟢"
     if price_chg < 0 and rsi < 45 and adx > 20: return "Bearish 🔴"
@@ -136,44 +180,48 @@ def refreshable_scanner():
     
     targets = list(FNO_MAP.keys())
     if not targets:
-        st.warning("No symbols loaded.")
+        st.warning("⚠️ No symbols loaded.")
         return
 
-    st.caption(f"Scanning {len(targets)} Stocks (Daily Candles for Stability)...")
+    st.caption(f"Scanning {len(targets)} Stocks (Using Daily Data)...")
     
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     
-    # Placeholder for data
     all_data = []
     bull = []
     bear = []
-    
-    # Progress Bar
     bar = st.progress(0)
     
     for i, sym in enumerate(targets):
         sid = FNO_MAP[sym]['id']
         
-        # Initialize default row (So every symbol appears!)
+        # 1. Default Row (Displayed even if data fetch fails)
         row = {
             "Symbol": sym, "LTP": 0.0, "Chg%": 0.0, 
             "RSI": 0.0, "ADX": 0.0, "Vol": 0, "Analysis": "No Data"
         }
         
         try:
+            # 2. Fetch Data
             df = fetch_daily_data(sid)
             
-            if not df.empty and len(df) > 10:
-                # Calculate Indicators
+            if not df.empty and len(df) > 1:
+                # 3. Calculate Indicators
                 df['RSI'] = ta.rsi(df['close'], 14)
                 df['ADX'] = ta.adx(df['high'], df['low'], df['close'], 14)['ADX_14']
                 
+                # 4. Get Latest Candle (Today/Last Closed)
                 curr = df.iloc[-1]
-                prev = df.iloc[-2]
-                
                 ltp = float(curr['close'])
-                prev_close = float(prev['close'])
                 
+                # 5. Get Previous Candle (Yesterday)
+                # If only 1 candle exists, use it as both
+                if len(df) >= 2:
+                    prev = df.iloc[-2]
+                    prev_close = float(prev['close'])
+                else:
+                    prev_close = ltp
+
                 chg_pct = 0.0
                 if prev_close > 0:
                     chg_pct = ((ltp - prev_close) / prev_close) * 100
@@ -184,9 +232,9 @@ def refreshable_scanner():
                 
                 analysis = get_trend_analysis(chg_pct, curr_rsi, curr_adx)
                 
-                # Update Row
+                # 6. Update Row
                 row = {
-                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}", # Clickable Link
+                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
                     "LTP": round(ltp, 2),
                     "Chg%": round(chg_pct, 2),
                     "RSI": round(curr_rsi, 1),
@@ -195,33 +243,27 @@ def refreshable_scanner():
                     "Analysis": analysis
                 }
                 
-                # Logic for Signals Tab
+                # 7. Add to Signals
                 if analysis == "Bullish 🟢": bull.append(row)
                 elif analysis == "Bearish 🔴": bear.append(row)
                 
-        except Exception as e:
-            # Keep the default row but mark error
-            row["Analysis"] = "Error"
+        except Exception:
+            row["Analysis"] = "Fetch Error"
             
-        # Add to Master List (Always!)
-        # We store a hidden sort key to sort by name later if needed
-        r_m = row.copy()
-        r_m['SortKey'] = sym 
-        all_data.append(r_m)
+        # 8. Append to Master List
+        # Use a hidden key for sorting, remove it before display
+        row['SortKey'] = sym 
+        all_data.append(row)
         
-        # Rate Limit Sleep
-        time.sleep(0.05) 
+        time.sleep(0.01) # Faster scan
         bar.progress((i+1)/len(targets))
         
     bar.empty()
     
-    # --- DISPLAY ---
-    
-    # Config for nice table
     cfg = {
-        "Symbol": st.column_config.LinkColumn("Symbol", display_text="NSE:(.*)"),
-        "LTP": st.column_config.NumberColumn("Price", format="%.2f"),
-        "Chg%": st.column_config.NumberColumn("Change", format="%.2f%%"),
+        "Symbol": st.column_config.LinkColumn("Script", display_text="NSE:(.*)"),
+        "LTP": st.column_config.NumberColumn("LTP", format="%.2f"),
+        "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
         "RSI": st.column_config.NumberColumn("RSI", format="%.1f"),
         "ADX": st.column_config.NumberColumn("ADX", format="%.1f"),
     }
@@ -231,17 +273,18 @@ def refreshable_scanner():
         with c1: 
             st.success(f"🟢 BULLS ({len(bull)})")
             if bull: st.dataframe(pd.DataFrame(bull), hide_index=True, column_config=cfg)
+            else: st.info("No Strong Bullish setups.")
         with c2: 
             st.error(f"🔴 BEARS ({len(bear)})")
             if bear: st.dataframe(pd.DataFrame(bear), hide_index=True, column_config=cfg)
+            else: st.info("No Strong Bearish setups.")
 
     with tab2:
         if all_data:
             df_all = pd.DataFrame(all_data)
-            # Remove helper key before showing
-            if 'SortKey' in df_all.columns: 
+            if 'SortKey' in df_all.columns:
                 df_all = df_all.sort_values('SortKey').drop(columns=['SortKey'])
-                
+            
             st.dataframe(
                 df_all, 
                 use_container_width=True, 
@@ -250,8 +293,8 @@ def refreshable_scanner():
                 height=700
             )
         else:
-            st.warning("No data rows generated.")
+            st.warning("No data generated.")
 
     st.write(f"🕒 **Last Sync:** {datetime.now(IST).strftime('%H:%M:%S')} IST")
 
-if dhan: refreshable_scanner()
+if dhan: refreshable_dashboard(); refreshable_scanner()
