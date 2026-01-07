@@ -8,7 +8,7 @@ import time
 import os
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
+st.set_page_config(page_title="iTW's Live F&O Screener Pro", layout="wide")
 IST = pytz.timezone('Asia/Kolkata') # Force IST Timezone
 
 # --- 2. AUTHENTICATION ---
@@ -25,7 +25,7 @@ def authenticate_user(user_in, pw_in):
 
 if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
 if not st.session_state["authenticated"]:
-    st.title("🔐 Absa's F&O Pro Login")
+    st.title("🔐 iTW's F&O Pro Login")
     with st.form("login_form"):
         u = st.text_input("Username"); p = st.text_input("Password", type="password")
         if st.form_submit_button("Log In"):
