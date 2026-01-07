@@ -44,7 +44,7 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX MAP (Proven Segment Codes) ---
+# --- 5. INDEX MAP (Standardized to IDX_I) ---
 INDEX_MAP = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
@@ -111,62 +111,46 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (PROVEN HYBRID + ROBUST MATH) ---
+# --- 9. DASHBOARD (Fixed Math Logic) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
     for key, info in INDEX_MAP.items():
         try:
-            # 1. SENSEX: Use 'get_quote' (Proven reliable for BSE)
-            if key == 'SENSEX':
-                # Critical: Exchange Code must be 'BSE'
-                res = dhan.get_quote(info['id'], 'BSE', 'INDEX')
-                if res['status'] == 'success' and 'data' in res:
-                    d = res['data']
-                    ltp = float(d.get('last_price', 0.0))
-                    prev = float(d.get('previous_close', ltp))
-                    if prev == 0: prev = ltp
-                    chg = ltp - prev
-                    pct = (chg / prev) * 100
-                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-                else:
-                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+            # 1. Fetch 5 Days of Chart Data (Proven working method)
+            to_d = datetime.now().strftime('%Y-%m-%d')
+            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
             
-            # 2. NIFTY/BANKNIFTY: Use Charts (Proven reliable for NSE)
-            else:
-                to_d = datetime.now().strftime('%Y-%m-%d')
-                from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
-                r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+            # Using 'IDX_I' for both NSE and BSE indices
+            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+            
+            if r['status'] == 'success' and r['data'].get('close'):
+                closes = r['data']['close']
+                times = r['data']['start_Time']
+                ltp = closes[-1]
                 
-                if r['status'] == 'success' and r['data'].get('close'):
-                    closes = r['data']['close']
-                    times = r['data']['start_Time']
-                    ltp = closes[-1]
-                    
-                    # --- ROBUST PREV CLOSE (No Timezone Issues) ---
-                    # We create a list of Dates from the timestamps
-                    dates = [str(t)[:10] for t in times] # Extract YYYY-MM-DD string
-                    
-                    # Find the last date that is NOT today's date
-                    today_date = dates[-1]
-                    prev_close = ltp # Default
-                    
-                    # Search backwards for the first different date
-                    for i in range(len(dates)-1, -1, -1):
-                        if dates[i] != today_date:
-                            prev_close = closes[i] # Found Yesterday's Close!
-                            break
-                    
-                    # Fallback logic if only today's data exists
-                    if prev_close == ltp and len(closes) > 0:
-                        prev_close = closes[0]
-
-                    chg = ltp - prev_close
-                    pct = (chg / prev_close) * 100
-                    data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
-                else:
-                    data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
+                # 2. Robust Change Calculation
+                # Identify the date of the LAST candle (Today)
+                last_candle_date = str(times[-1])[:10]
+                
+                # Find the close of the PREVIOUS day (Yesterday)
+                prev_close = ltp # Default fallback
+                
+                # Loop backwards to find the first candle that has a DIFFERENT date
+                for i in range(len(times)-1, -1, -1):
+                    curr_date = str(times[i])[:10]
+                    if curr_date != last_candle_date:
+                        prev_close = closes[i] # Found yesterday's close!
+                        break
+                
+                # Calculate Change
+                chg = ltp - prev_close
+                pct = (chg / prev_close) * 100 if prev_close > 0 else 0
+                
+                data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+            else:
+                data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
         except: 
             data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
