@@ -10,7 +10,7 @@ import os
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
 
-# --- 2. AUTHENTICATION SYSTEM ---
+# --- 2. AUTHENTICATION ---
 AUTH_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSEan21a9IVnkdmTFP2Q9O_ILI3waF52lFWQ5RTDtXDZ5MI4_yTQgFYcCXN5HxgkCxuESi5Dwe9iROB/pub?gid=0&single=true&output=csv"
 
 def authenticate_user(user_in, pw_in):
@@ -26,8 +26,7 @@ if "authenticated" not in st.session_state: st.session_state["authenticated"] = 
 if not st.session_state["authenticated"]:
     st.title("🔐 Absa's F&O Pro Login")
     with st.form("login_form"):
-        u = st.text_input("Username")
-        p = st.text_input("Password", type="password")
+        u = st.text_input("Username"); p = st.text_input("Password", type="password")
         if st.form_submit_button("Log In"):
             if authenticate_user(u, p): st.session_state["authenticated"] = True; st.rerun()
             else: st.error("Invalid Credentials")
@@ -37,7 +36,7 @@ if not st.session_state["authenticated"]:
 st.title("🚀 Absa's Live F&O Screener Pro")
 if st.sidebar.button("Log out"): st.session_state["authenticated"] = False; st.rerun()
 
-# --- 4. DHAN API CONNECTION ---
+# --- 4. DHAN API ---
 dhan = None
 try:
     client_id = st.secrets["DHAN_CLIENT_ID"]
@@ -52,76 +51,50 @@ INDEX_MAP = {'NIFTY': '13', 'BANKNIFTY': '25', 'SENSEX': '51206'}
 @st.cache_data(ttl=3600*4)
 def get_fno_stock_map():
     fno_map = {}
-    
-    # Check File
     if not os.path.exists("dhan_master.csv"):
-        st.error("❌ 'dhan_master.csv' NOT FOUND. Please upload it to your app folder.")
+        st.error("❌ 'dhan_master.csv' NOT FOUND. Please upload it.")
         return fno_map 
 
     try:
-        # Load CSV
         df = pd.read_csv("dhan_master.csv", on_bad_lines='skip', low_memory=False)
         df.columns = df.columns.str.strip() 
         
-        # Sidebar Debug Stats
+        # DEBUGGER
         st.sidebar.markdown("### 🛠️ CSV Debugger")
-        st.sidebar.info(f"Total Rows in CSV: {len(df)}")
+        st.sidebar.info(f"Total Rows: {len(df)}")
         
-        # Standardize Columns
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
         col_name = 'SEM_TRADING_SYMBOL'
         col_inst = 'SEM_INSTRUMENT_NAME'
         col_expiry = 'SEM_EXPIRY_DATE'
         
-        # Normalize Text
         if col_name in df.columns: df[col_name] = df[col_name].astype(str).str.upper().str.strip()
         if col_exch in df.columns: df[col_exch] = df[col_exch].astype(str).str.strip()
         if col_inst in df.columns: df[col_inst] = df[col_inst].astype(str).str.strip()
         
-        # Filter 1: Exchange & Instrument
         if col_exch in df.columns and col_inst in df.columns:
             stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
-            st.sidebar.info(f"NSE Futures Found: {len(stk_df)}")
+            st.sidebar.info(f"NSE Futures: {len(stk_df)}")
             
-            # Filter 2: Dates (The Tricky Part)
             if col_expiry in stk_df.columns:
-                # Force string format first to handle mixed types
                 stk_df[col_expiry] = stk_df[col_expiry].astype(str)
-                
-                # Robust Parsing: Try Day-First, coerce errors
                 stk_df['dt_parsed'] = pd.to_datetime(stk_df[col_expiry], dayfirst=True, errors='coerce')
                 
-                # Check for parsing failures
-                valid_dates = stk_df[stk_df['dt_parsed'].notna()]
-                st.sidebar.info(f"Valid Dates Parsed: {len(valid_dates)}")
-                
-                # Filter Future Expiries
                 today = pd.Timestamp.now().normalize()
-                valid_futures = valid_dates[valid_dates['dt_parsed'] >= today]
-                st.sidebar.success(f"Active Futures (>= Today): {len(valid_futures)}")
+                valid_futures = stk_df[stk_df['dt_parsed'] >= today]
+                st.sidebar.success(f"Active Futures: {len(valid_futures)}")
                 
-                if len(valid_futures) == 0:
-                    st.error("❌ All dates were filtered out! Check if your CSV dates are older than today.")
-                
-                # Sort and Deduplicate
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
                 curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
                 
-                # Build Map
                 for _, row in curr_stk.iterrows():
                     base_sym = row[col_name].split('-')[0]
-                    # Skip Test Symbols usually starting with numbers (like 011NSETEST)
-                    if not base_sym[0].isdigit(): 
-                        disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
-                        fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
+                    # REMOVED THE "isdigit()" FILTER so it accepts '011NSETEST'
+                    disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
+                    fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
         
-        if not fno_map:
-            st.error("❌ Scanner List is Empty. Check Sidebar Debugger for details.")
-            
-    except Exception as e:
-        st.error(f"Error reading CSV: {e}")
-    
+    except Exception as e: st.error(f"Error reading CSV: {e}")
     return fno_map
 
 with st.spinner("Loading Stock List..."):
@@ -149,7 +122,7 @@ def get_oi_analysis(price_chg, oi_chg):
     if price_chg > 0 and oi_chg < 0: return "Short Covering 🚀"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (Fixed Lookback) ---
+# --- 9. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     indices = [
@@ -161,13 +134,10 @@ def refreshable_dashboard():
     for i in indices:
         try:
             to_d = datetime.now().strftime('%Y-%m-%d')
-            # Look back 10 days to handle weekends/holidays
             from_d = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
             r = dhan.intraday_minute_data(INDEX_MAP[i['key']], i['seg'], "INDEX", from_d, to_d, 1)
-            
             if r['status'] == 'success' and r['data'].get('close'):
                 ltp = r['data']['close'][-1]
-                # Compare vs ~1 day ago (375 mins)
                 prev = r['data']['close'][max(0, len(r['data']['close']) - 375)]
                 chg = ltp - prev
                 pct = (chg/prev)*100 if prev > 0 else 0
@@ -181,8 +151,8 @@ def refreshable_dashboard():
     with c3: d=data.get("SENSEX"); st.metric("SENSEX", f"{d['ltp']:,.2f}", f"{d['chg']:.2f} ({d['pct']:.2f}%)")
     with c4:
         bias, color = ("SIDEWAYS ↔️", "gray")
-        if data.get("NIFTY 50", {}).get('pct', 0) > 0.25: bias, color = ("BULLISH 🚀", "green")
-        elif data.get("NIFTY 50", {}).get('pct', 0) < -0.25: bias, color = ("BEARISH 📉", "red")
+        if data.get("NIFTY 50")['pct'] > 0.25: bias, color = ("BULLISH 🚀", "green")
+        elif data.get("NIFTY 50")['pct'] < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
 # --- 10. SCANNER ---
@@ -226,6 +196,8 @@ def refreshable_scanner():
                 if p_chg > 0.5 and row['RSI'] > 60 and row['ADX'] > 20: bull.append(row)
                 elif p_chg < -0.5 and row['RSI'] < 45 and row['ADX'] > 20: bear.append(row)
         except: pass
+        # Added sleep to prevent API blocking since you are scanning many test symbols
+        time.sleep(0.05) 
         bar.progress((i+1)/len(targets))
     
     bar.empty()
