@@ -44,11 +44,12 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX MAP ---
-INDEX_MAP = {
+# --- 5. INDEX CONFIGURATION (CORRECTED) ---
+# All Indices (NSE & BSE) live in the 'IDX_I' segment
+INDEX_CONFIG = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51', 'seg': 'IDX_I', 'name': 'SENSEX'}
+    'SENSEX': {'id': '51206', 'seg': 'IDX_I', 'name': 'SENSEX'} 
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -112,20 +113,16 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (HYBRID FIX) ---
+# --- 9. DASHBOARD (HYBRID: Quote for Sensex, Charts for Nifty) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
-    for key, info in INDEX_MAP.items():
+    for key, info in INDEX_CONFIG.items():
         try:
-            # HYBRID LOGIC: 
-            # 1. Sensex uses 'get_quote' (Bypasses Chart issues)
-            # 2. Nifty/BankNifty use 'intraday_minute_data' (Proven to work)
-            
+            # 1. SENSEX: Use 'get_quote' (Reliable for BSE)
             if key == 'SENSEX':
-                # Fetch Live Quote for Sensex
-                res = dhan.get_quote(info['id'], 'BSE', 'INDEX') # 'BSE' exchange code is critical
+                res = dhan.get_quote(info['id'], info['seg'], "INDEX")
                 if res['status'] == 'success' and 'data' in res:
                     d = res['data']
                     ltp = d.get('last_price', 0.0)
@@ -137,8 +134,8 @@ def refreshable_dashboard():
                 else:
                     data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
             
+            # 2. NIFTY/BANKNIFTY: Use Charts (Proven Working)
             else:
-                # Use Charts for Nifty/BankNifty (As per previous success)
                 to_d = datetime.now().strftime('%Y-%m-%d')
                 from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
                 r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
