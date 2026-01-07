@@ -74,6 +74,7 @@ def get_fno_stock_map():
         
         if col_exch in df.columns and col_inst in df.columns:
             stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
+            st.sidebar.info(f"NSE Futures Found: {len(stk_df)}")
             
             if col_expiry in stk_df.columns:
                 stk_df[col_expiry] = stk_df[col_expiry].astype(str)
@@ -81,10 +82,9 @@ def get_fno_stock_map():
                 
                 today = pd.Timestamp.now().normalize()
                 valid_futures = stk_df[stk_df['dt_parsed'] >= today]
-                st.sidebar.success(f"Active Futures: {len(valid_futures)}")
                 
                 if len(valid_futures) > 0:
-                    st.sidebar.write("👇 **Scanning These Symbols:**")
+                    st.sidebar.write("👇 **Scanning These Symbols (First 5):**")
                     st.sidebar.code("\n".join(valid_futures[col_name].head(5).tolist()))
 
                 valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
@@ -101,29 +101,14 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DATA FETCHING (DEBUG MODE) ---
-def fetch_futures_data(security_id, interval=60, is_debug=False):
+# --- 7. DATA FETCHING ---
+def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
         from_date = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         res = dhan.intraday_minute_data(str(security_id), "NSE_FNO", "FUTSTK", from_date, to_date, interval)
-        
-        # DEBUG: Print first failure/success reason to sidebar
-        if is_debug:
-            if res['status'] == 'success':
-                data_count = len(res.get('data', {}).get('start_Time', []))
-                st.sidebar.success(f"✅ Test Fetch Success! Got {data_count} candles.")
-            else:
-                st.sidebar.error(f"❌ Test Fetch Failed: {res}")
-
-        if res['status'] == 'success':
-            df = pd.DataFrame(res['data'])
-            if df.empty: return pd.DataFrame()
-            df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
-            return df
-    except Exception as e:
-        if is_debug: st.sidebar.error(f"❌ API Exception: {e}")
-    return pd.DataFrame()
+        return res # Return FULL response for debugging
+    except Exception as e: return {"status": "failure", "remarks": str(e)}
 
 # --- 8. OI LOGIC ---
 def get_oi_analysis(price_chg, oi_chg):
@@ -146,7 +131,9 @@ def refreshable_dashboard():
         try:
             to_d = datetime.now().strftime('%Y-%m-%d')
             from_d = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+            # Fetch full response
             r = dhan.intraday_minute_data(INDEX_MAP[i['key']], i['seg'], "INDEX", from_d, to_d, 1)
+            
             if r['status'] == 'success' and r['data'].get('close'):
                 ltp = r['data']['close'][-1]
                 prev = r['data']['close'][max(0, len(r['data']['close']) - 375)]
@@ -170,6 +157,10 @@ def refreshable_dashboard():
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
+    
+    # --- VISUAL DEBUGGER FOR THE USER ---
+    st.info("🔍 **System Status:** Scanning has started. Check the Debug Box below if results are empty.")
+    
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     
     targets = list(FNO_MAP.keys())
@@ -181,39 +172,57 @@ def refreshable_scanner():
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
-            # DEBUG THE FIRST REQUEST
-            is_debug_req = (i == 0)
             
-            df = fetch_futures_data(sid, interval=60, is_debug=is_debug_req)
+            # --- X-RAY DEBUG: PRINT FIRST RESULT TO SCREEN ---
+            res = fetch_futures_data(sid, interval=60)
             
-            if not df.empty and len(df) > 20:
-                df['RSI'] = ta.rsi(df['Close'], 14)
-                df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
-                df['EMA'] = ta.ema(df['Close'], 5)
-                
-                curr = df.iloc[-1]; prev = df.iloc[-2]
-                ltp = curr['Close']
-                p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
-                o_chg = round(((curr['OI'] - prev['OI'])/prev['OI'])*100, 2) if prev['OI'] > 0 else 0
-                sent = get_oi_analysis(p_chg, o_chg)
-                mom = round(((ltp - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
-                
-                row = {
-                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
-                    "LTP": round(ltp, 2), "Mom %": mom, "Price Chg%": p_chg,
-                    "RSI": round(curr['RSI'], 1), "ADX": round(curr['ADX'], 1),
-                    "OI Chg%": o_chg, "Analysis": sent
-                }
-                
-                r_m = row.copy(); r_m['Sort'] = sym
-                all_data.append(r_m)
-                
-                if p_chg > 0.5 and row['RSI'] > 60 and row['ADX'] > 20: bull.append(row)
-                elif p_chg < -0.5 and row['RSI'] < 45 and row['ADX'] > 20: bear.append(row)
+            if i == 0:
+                with st.expander(f"🛠️ X-Ray Debug: Checking first symbol '{sym}' (ID: {sid})", expanded=True):
+                    st.write("**API Status:**", res.get('status'))
+                    st.write("**Data Received:**", "Yes" if res.get('data') else "No (Empty List)")
+                    if res.get('status') == 'failure':
+                        st.error(f"API Error Message: {res.get('remarks')}")
+                    elif not res.get('data'):
+                         st.warning("⚠️ API returned 'Success' but DATA IS EMPTY. This means no trades happened today or the Security ID is wrong.")
+                    else:
+                        st.success(f"✅ Data looks good! Found {len(res['data']['open'])} candles.")
+                        st.json(res) # Show Raw JSON
+
+            # Process Data
+            if res['status'] == 'success':
+                raw_data = res['data']
+                if raw_data:
+                    df = pd.DataFrame(raw_data)
+                    df.rename(columns={'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}, inplace=True)
+                    
+                    if not df.empty and len(df) > 20:
+                        df['RSI'] = ta.rsi(df['Close'], 14)
+                        df['ADX'] = ta.adx(df['High'], df['Low'], df['Close'], 14)['ADX_14']
+                        df['EMA'] = ta.ema(df['Close'], 5)
+                        
+                        curr = df.iloc[-1]; prev = df.iloc[-2]
+                        ltp = curr['Close']
+                        p_chg = round(((ltp - prev['Close'])/prev['Close'])*100, 2)
+                        o_chg = round(((curr['OI'] - prev['OI'])/prev['OI'])*100, 2) if prev['OI'] > 0 else 0
+                        sent = get_oi_analysis(p_chg, o_chg)
+                        mom = round(((ltp - df['EMA'].iloc[-1])/df['EMA'].iloc[-1])*100, 2)
+                        
+                        row = {
+                            "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
+                            "LTP": round(ltp, 2), "Mom %": mom, "Price Chg%": p_chg,
+                            "RSI": round(curr['RSI'], 1), "ADX": round(curr['ADX'], 1),
+                            "OI Chg%": o_chg, "Analysis": sent
+                        }
+                        
+                        r_m = row.copy(); r_m['Sort'] = sym
+                        all_data.append(r_m)
+                        
+                        if p_chg > 0.5 and row['RSI'] > 60 and row['ADX'] > 20: bull.append(row)
+                        elif p_chg < -0.5 and row['RSI'] < 45 and row['ADX'] > 20: bear.append(row)
         except: pass
         
-        # CRITICAL: Sleep to prevent Rate Limiting (429 Errors)
-        time.sleep(0.2) 
+        # Safe Delay
+        time.sleep(0.15) 
         bar.progress((i+1)/len(targets))
     
     bar.empty()
@@ -232,7 +241,7 @@ def refreshable_scanner():
             
     with tab2:
         if all_data: st.dataframe(pd.DataFrame(all_data).sort_values("Sort").drop(columns=['Sort']), use_container_width=True, hide_index=True, column_config=cfg, height=600)
-        else: st.warning("No data found for the symbols in your list (Check Sidebar for API Errors).")
+        else: st.warning("No data found. Check the X-Ray Debugger at the top.")
 
     st.write(f"🕒 **Last Data Sync:** {datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')} IST")
     st.markdown("<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
