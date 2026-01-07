@@ -58,57 +58,74 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 5. HARDCODED INDEX MAP (DASHBOARD) ---
-# These IDs are static on Dhan and will not change.
+# --- 5. HARDCODED INDEX MAP (Dashboard Works Independently) ---
+# Nifty (13), BankNifty (25), Sensex (51206)
 INDEX_MAP = {
-    'NIFTY': '13',       # NSE Nifty 50
-    'BANKNIFTY': '25',   # NSE Nifty Bank
-    'SENSEX': '51206'    # BSE Sensex (Standard BSE ID)
+    'NIFTY': '13',       
+    'BANKNIFTY': '25',   
+    'SENSEX': '51206'    
 }
 
-# --- 6. LOCAL MASTER LIST LOADER (STOCKS ONLY) ---
+# --- 6. LOCAL MASTER LIST LOADER (WITH DEBUGGER) ---
 @st.cache_data(ttl=3600*4)
 def get_fno_stock_map():
     fno_map = {}
     
-    # Check if file exists
+    # 1. Check if file exists
     if not os.path.exists("dhan_master.csv"):
-        st.error("❌ 'dhan_master.csv' NOT FOUND. Please upload it to your app folder for the Scanner to work.")
+        st.error("❌ 'dhan_master.csv' NOT FOUND. Please upload it to your app folder.")
         return fno_map 
 
     try:
-        # Read Local File
-        df = pd.read_csv("dhan_master.csv")
+        # 2. Read Local File (Robust Read)
+        # on_bad_lines='skip' helps if manual editing broke some rows
+        df = pd.read_csv("dhan_master.csv", on_bad_lines='skip')
         df.columns = df.columns.str.strip() 
         
-        # Standard Column Names
+        # --- DEBUG SECTION (Visual Check for You) ---
+        with st.expander("🛠️ CSV Debugger (Check this if Scanner is Empty)", expanded=False):
+            st.write("Columns Found:", df.columns.tolist())
+            st.write("First 3 Rows of Data:", df.head(3))
+            
+            # Check for Exchange Column
+            if 'SEM_EXM_EXCH_ID' in df.columns:
+                st.write("Exchanges Found:", df['SEM_EXM_EXCH_ID'].unique())
+            else:
+                st.error("⚠️ Column 'SEM_EXM_EXCH_ID' missing! Did Excel rename it?")
+
+        # 3. Standard Logic
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
         col_name = 'SEM_TRADING_SYMBOL'
         col_inst = 'SEM_INSTRUMENT_NAME'
         
-        # Normalize Symbols
-        df[col_name] = df[col_name].astype(str).str.upper().str.strip()
+        # Normalize
+        if col_name in df.columns:
+            df[col_name] = df[col_name].astype(str).str.upper().str.strip()
         
-        # Filter: NSE Stock Futures (FUTSTK)
-        stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')]
-        
-        # Helper to find nearest expiry
-        def get_current_futures(dataframe):
-            if 'SEM_EXPIRY_DATE' in dataframe.columns:
-                dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
-                today = pd.Timestamp.now().normalize()
-                valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
-                valid = valid.sort_values(by=[col_name, 'SEM_EXPIRY_DATE'])
-                return valid.drop_duplicates(subset=[col_name], keep='first')
-            return dataframe
+        # 4. Filter: NSE Stock Futures (FUTSTK)
+        # Ensure columns exist before filtering
+        if col_exch in df.columns and col_inst in df.columns:
+            stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')]
+            
+            # Helper to find nearest expiry
+            def get_current_futures(dataframe):
+                if 'SEM_EXPIRY_DATE' in dataframe.columns:
+                    dataframe['SEM_EXPIRY_DATE'] = pd.to_datetime(dataframe['SEM_EXPIRY_DATE'], format='%Y-%m-%d %H:%M:%S', errors='coerce')
+                    today = pd.Timestamp.now().normalize()
+                    valid = dataframe[dataframe['SEM_EXPIRY_DATE'] >= today]
+                    valid = valid.sort_values(by=[col_name, 'SEM_EXPIRY_DATE'])
+                    return valid.drop_duplicates(subset=[col_name], keep='first')
+                return dataframe
 
-        # Process Stocks
-        curr_stk = get_current_futures(stk_df)
-        for _, row in curr_stk.iterrows():
-            base_sym = row[col_name].split('-')[0]
-            disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
-            fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
+            # Process Stocks
+            curr_stk = get_current_futures(stk_df)
+            for _, row in curr_stk.iterrows():
+                base_sym = row[col_name].split('-')[0]
+                disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
+                fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
+        else:
+            st.error("❌ Critical: Required columns (EXCH_ID or INSTRUMENT_NAME) missing in CSV.")
             
     except Exception as e:
         st.error(f"Error reading CSV: {e}")
@@ -153,20 +170,22 @@ def get_oi_analysis(price_chg, oi_chg):
     return "Neutral ⚪"
 
 
-# --- 9. DASHBOARD (HARDCODED INDICES) ---
+# --- 9. DASHBOARD (HARDCODED & ROBUST) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    # Hardcoded Configuration
+    # Only Nifty, Bank Nifty, Sensex
     indices_config = [
         {"name": "NIFTY 50", "key": "NIFTY", "seg": "IDX_I"},
         {"name": "BANK NIFTY", "key": "BANKNIFTY", "seg": "IDX_I"},
-        {"name": "SENSEX", "key": "SENSEX", "seg": "BSE_IDX"} # Using BSE Index Segment
+        {"name": "SENSEX", "key": "SENSEX", "seg": "BSE_IDX"}
     ]
     
     data_display = {}
     
     for item in indices_config:
         key = item['key']
+        # Use HARDCODED Map (Global)
+        if key not in INDEX_MAP: continue
         sec_id = INDEX_MAP[key]
         segment = item['seg']
         
@@ -197,7 +216,7 @@ def refreshable_dashboard():
         except:
             data_display[item['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
-    # Layout: 4 Columns (Nifty, BankNifty, Sensex, Bias)
+    # Layout
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     
     with c1:
@@ -211,7 +230,7 @@ def refreshable_dashboard():
     with c3:
         s = data_display.get("SENSEX", {"ltp":0, "chg":0, "pct":0})
         st.metric("SENSEX", f"{s['ltp']:,.2f}", f"{s['chg']:.2f} ({s['pct']:.2f}%)")
-        
+
     with c4:
         n_pct = data_display.get("NIFTY 50", {}).get("pct", 0)
         bias = "SIDEWAYS ↔️"
@@ -236,7 +255,7 @@ def refreshable_scanner():
     target_symbols = list(FNO_MAP.keys()) 
     
     if not target_symbols:
-        st.warning("Scanner: No F&O symbols found. Please upload 'dhan_master.csv'.")
+        st.warning("Scanner: No F&O symbols found. Please check 'CSV Debugger' above to see why.")
         return
 
     progress_bar = st.progress(0, f"Scanning {len(target_symbols)} Futures...")
