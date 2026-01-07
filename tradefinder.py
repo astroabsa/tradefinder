@@ -86,6 +86,8 @@ def get_fno_stock_map():
             
     except Exception as e: st.error(f"Error reading CSV: {e}")
     return fno_map
+with st.spinner("Loading Stock List..."):
+    FNO_MAP = get_fno_stock_map()
 
 # --- 7. HELPER: GET YESTERDAY'S CLOSE (The "Simple" Way) ---
 def get_prev_close(security_id):
