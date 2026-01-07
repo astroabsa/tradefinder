@@ -25,7 +25,7 @@ def authenticate_user(user_in, pw_in):
 
 if "authenticated" not in st.session_state: st.session_state["authenticated"] = False
 if not st.session_state["authenticated"]:
-    st.title("🔐 Absa's F&O Pro Login")
+    st.title("🔐 iTW's F&O Pro Login")
     with st.form("login_form"):
         u = st.text_input("Username"); p = st.text_input("Password", type="password")
         if st.form_submit_button("Log In"):
@@ -34,7 +34,7 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN UI ---
-st.title("🚀 Absa's Live F&O Screener Pro")
+st.title("🚀 iTW's Live F&O Pro")
 if st.sidebar.button("Log out"): st.session_state["authenticated"] = False; st.rerun()
 
 # --- 4. API CONNECTION ---
@@ -52,48 +52,40 @@ INDEX_MAP = {
     'SENSEX': {'id': '51', 'name': 'SENSEX'}
 }
 
-# --- 6. MASTER LIST LOADER ---
+# --- 6. CUSTOM CSV WATCHLIST LOADER (UPDATED) ---
 @st.cache_data(ttl=3600*4)
 def get_fno_stock_map():
     fno_map = {}
-    if not os.path.exists("dhan_master.csv"):
-        st.error("❌ 'dhan_master.csv' NOT FOUND."); return fno_map 
+    # File must be in the same folder as this script
+    file_path = "stock_watchlist.csv" 
+    
+    if not os.path.exists(file_path):
+        st.error(f"❌ '{file_path}' NOT FOUND. Please upload it to your repository folder.")
+        return fno_map 
 
     try:
-        df = pd.read_csv("dhan_master.csv", on_bad_lines='skip', low_memory=False)
+        # Read the CSV with the specific columns from your screenshot
+        df = pd.read_csv(file_path)
         df.columns = df.columns.str.strip() 
         
-        col_exch = 'SEM_EXM_EXCH_ID'
-        col_id = 'SEM_SMST_SECURITY_ID'
-        col_name = 'SEM_TRADING_SYMBOL'
-        col_inst = 'SEM_INSTRUMENT_NAME'
-        col_expiry = 'SEM_EXPIRY_DATE'
+        # Check for the required columns shown in your image
+        req_cols = ['SEM_TRADING_SYMBOL', 'SEM_SMST_SECURITY_ID']
         
-        if col_name in df.columns: df[col_name] = df[col_name].astype(str).str.upper().str.strip()
-        if col_exch in df.columns: df[col_exch] = df[col_exch].astype(str).str.strip()
-        if col_inst in df.columns: df[col_inst] = df[col_inst].astype(str).str.strip()
-        
-        if col_exch in df.columns and col_inst in df.columns:
-            stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
+        if all(col in df.columns for col in req_cols):
+            st.sidebar.success(f"✅ Loaded {len(df)} Stocks from CSV")
             
-            if col_expiry in stk_df.columns:
-                stk_df[col_expiry] = stk_df[col_expiry].astype(str)
-                stk_df['dt_parsed'] = pd.to_datetime(stk_df[col_expiry], dayfirst=True, errors='coerce')
+            for index, row in df.iterrows():
+                # Extract Symbol and ID
+                sym = str(row['SEM_TRADING_SYMBOL']).strip().upper()
+                sid = str(row['SEM_SMST_SECURITY_ID']).strip()
                 
-                today = pd.Timestamp.now().normalize()
-                valid_futures = stk_df[stk_df['dt_parsed'] >= today]
-                valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
-                curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
-                
-                for _, row in curr_stk.iterrows():
-                    base_sym = row[col_name].split('-')[0]
-                    disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
-                    fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
+                # Add to map
+                fno_map[sym] = {'id': sid, 'name': sym}
+        else:
+            st.sidebar.error(f"❌ CSV Error: Missing columns. Found: {list(df.columns)}")
+            
     except Exception as e: st.error(f"Error reading CSV: {e}")
     return fno_map
-
-with st.spinner("Loading Stock List..."):
-    FNO_MAP = get_fno_stock_map()
 
 # --- 7. HELPER: GET YESTERDAY'S CLOSE (The "Simple" Way) ---
 def get_prev_close(security_id):
