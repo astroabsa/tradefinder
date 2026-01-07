@@ -44,12 +44,11 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION (FIXED) ---
-# We use 'NSE' and 'BSE' for get_quote, not 'IDX_I'
+# --- 5. INDEX CONFIGURATION (Back to what worked) ---
 INDEX_CONFIG = {
-    'NIFTY': {'id': '13', 'exch': 'NSE', 'name': 'NIFTY 50'}, 
-    'BANKNIFTY': {'id': '25', 'exch': 'NSE', 'name': 'BANK NIFTY'}, 
-    'SENSEX': {'id': '51206', 'exch': 'BSE', 'name': 'SENSEX'}
+    'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
+    'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
+    'SENSEX': {'id': '51206', 'seg': 'BSE_IDX', 'name': 'SENSEX'}
 }
 
 # --- 6. MASTER LIST LOADER ---
@@ -113,20 +112,30 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (FIXED: Using Correct Exchange Codes) ---
+# --- 9. DASHBOARD (REVERTED TO CHART DATA) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
     for key, info in INDEX_CONFIG.items():
         try:
-            # FIX: Passing 'NSE'/'BSE' instead of 'IDX_I'
-            res = dhan.get_quote(info['id'], info['exch'], "INDEX")
+            # We use intraday data because we know it works for you
+            to_d = datetime.now().strftime('%Y-%m-%d')
+            # Look back 5 days to ensure we find "Previous Close"
+            from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
             
-            if res['status'] == 'success' and 'data' in res:
-                d = res['data']
-                ltp = d.get('last_price', 0.0)
-                prev = d.get('previous_close', ltp)
+            # Using specific segments (IDX_I for NSE, BSE_IDX for Sensex)
+            r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
+            
+            if r['status'] == 'success' and r['data'].get('close'):
+                closes = r['data']['close']
+                ltp = closes[-1]
+                
+                # Estimate Change: Compare to price ~1 day (375 mins) ago
+                # This is an approximation but it guarantees non-zero values
+                lookback_idx = max(0, len(closes) - 375)
+                prev = closes[lookback_idx]
+                
                 if prev == 0: prev = ltp
                 
                 chg = ltp - prev
@@ -148,7 +157,7 @@ def refreshable_dashboard():
         elif nifty_pct < -0.25: bias, color = ("BEARISH 📉", "red")
         st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {color}; border-radius:10px; color:{color}'><h3>Bias: {bias}</h3></div>", unsafe_allow_html=True)
 
-# --- 10. SCANNER (WORKING PERFECTLY) ---
+# --- 10. SCANNER (WORKING) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
