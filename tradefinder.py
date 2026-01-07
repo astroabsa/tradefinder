@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import time
 import requests
 import io
+import os
 
 # --- 1. APP CONFIGURATION ---
 st.set_page_config(page_title="Absa's Live F&O Screener Pro", layout="wide")
@@ -57,25 +58,30 @@ except Exception as e:
     st.error(f"⚠️ API Error: Check .streamlit/secrets.toml. Details: {e}")
     st.stop()
 
-# --- 5. LOCAL MASTER LIST LOADER (STABLE VERSION) ---
+# --- 5. HARDCODED INDEX MAP (DASHBOARD) ---
+# These IDs are static on Dhan and will not change.
+INDEX_MAP = {
+    'NIFTY': '13',       # NSE Nifty 50
+    'BANKNIFTY': '25',   # NSE Nifty Bank
+    'SENSEX': '51206'    # BSE Sensex (Standard BSE ID)
+}
+
+# --- 6. LOCAL MASTER LIST LOADER (STOCKS ONLY) ---
 @st.cache_data(ttl=3600*4)
-def get_master_data_map():
+def get_fno_stock_map():
     fno_map = {}
-    index_map = {}
     
-    # Hardcoded Defaults (Fallback to prevent "INDEX_MAP not defined" error)
-    index_map['NIFTY'] = '13'
-    index_map['BANKNIFTY'] = '25'
-    
+    # Check if file exists
+    if not os.path.exists("dhan_master.csv"):
+        st.error("❌ 'dhan_master.csv' NOT FOUND. Please upload it to your app folder for the Scanner to work.")
+        return fno_map 
+
     try:
-        # 1. READ LOCAL FILE INSTEAD OF URL
-        # Ensure 'dhan_master.csv' is uploaded to your repo
+        # Read Local File
         df = pd.read_csv("dhan_master.csv")
+        df.columns = df.columns.str.strip() 
         
-        # Clean column names
-        df.columns = df.columns.str.strip()
-        
-        # 2. STANDARD COLUMNS
+        # Standard Column Names
         col_exch = 'SEM_EXM_EXCH_ID'
         col_id = 'SEM_SMST_SECURITY_ID'
         col_name = 'SEM_TRADING_SYMBOL'
@@ -84,12 +90,8 @@ def get_master_data_map():
         # Normalize Symbols
         df[col_name] = df[col_name].astype(str).str.upper().str.strip()
         
-        # 3. FILTER LISTS
-        # Stocks Futures (FUTSTK)
+        # Filter: NSE Stock Futures (FUTSTK)
         stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')]
-        
-        # Spot Indices (INDEX)
-        idx_df = df[df[col_inst] == 'INDEX']
         
         # Helper to find nearest expiry
         def get_current_futures(dataframe):
@@ -108,22 +110,16 @@ def get_master_data_map():
             disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
             fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
             
-        # Process Indices
-        nifty = idx_df[(idx_df[col_exch] == 'NSE') & (idx_df[col_name] == 'NIFTY 50')]
-        if not nifty.empty: index_map['NIFTY'] = str(nifty.iloc[0][col_id])
-        
-        bank = idx_df[(idx_df[col_exch] == 'NSE') & (idx_df[col_name].isin(['NIFTY BANK', 'BANKNIFTY']))]
-        if not bank.empty: index_map['BANKNIFTY'] = str(bank.iloc[0][col_id])
-        
-        sensex = idx_df[(idx_df[col_exch] == 'BSE') & (idx_df[col_name].str.contains('SENSEX'))]
-        if not sensex.empty: index_map['SENSEX'] = str(sensex.iloc[0][col_id])
-
-    except FileNotFoundError:
-        st.error("❌ 'dhan_master.csv' not found! Please upload the CSV to your app folder.")
     except Exception as e:
-        st.error(f"Master List Error: {e}")
+        st.error(f"Error reading CSV: {e}")
     
-    return fno_map, index_map# --- 6. DATA FETCHING ---
+    return fno_map
+
+# Load Stock Map
+with st.spinner("Loading Stock List..."):
+    FNO_MAP = get_fno_stock_map()
+
+# --- 7. DATA FETCHING ---
 def fetch_futures_data(security_id, interval=60):
     try:
         to_date = datetime.now().strftime('%Y-%m-%d')
@@ -142,14 +138,13 @@ def fetch_futures_data(security_id, interval=60):
             data = res['data']
             if not data: return pd.DataFrame()
             df = pd.DataFrame(data)
-            # Rename columns to standard names
             col_map = {'start_Time':'datetime', 'open':'Open', 'high':'High', 'low':'Low', 'close':'Close', 'volume':'Volume', 'oi':'OI'}
             df.rename(columns=col_map, inplace=True)
             return df
     except: pass
     return pd.DataFrame()
 
-# --- 7. OI LOGIC ---
+# --- 8. OI LOGIC ---
 def get_oi_analysis(price_chg, oi_chg):
     if price_chg > 0 and oi_chg > 0: return "Long Buildup 🟢"
     if price_chg < 0 and oi_chg > 0: return "Short Buildup 🔴"
@@ -158,31 +153,25 @@ def get_oi_analysis(price_chg, oi_chg):
     return "Neutral ⚪"
 
 
-# --- 8. DASHBOARD (SPOT PRICES) ---
+# --- 9. DASHBOARD (HARDCODED INDICES) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
-    # Configuration for Spot Indices
+    # Hardcoded Configuration
     indices_config = [
         {"name": "NIFTY 50", "key": "NIFTY", "seg": "IDX_I"},
         {"name": "BANK NIFTY", "key": "BANKNIFTY", "seg": "IDX_I"},
-        {"name": "SENSEX", "key": "SENSEX", "seg": "BSE_IDX"}
+        {"name": "SENSEX", "key": "SENSEX", "seg": "BSE_IDX"} # Using BSE Index Segment
     ]
     
     data_display = {}
     
     for item in indices_config:
         key = item['key']
-        # Skip if ID not found (e.g. Sensex if CSV failed)
-        if key not in INDEX_MAP: 
-            data_display[item['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
-            continue
-        
         sec_id = INDEX_MAP[key]
         segment = item['seg']
         
         try:
             to_date = datetime.now().strftime('%Y-%m-%d')
-            # Look back 4 days to ensure we find "Previous Close" even on Mondays/Holidays
             from_date = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d')
             
             res = dhan.intraday_minute_data(
@@ -195,15 +184,9 @@ def refreshable_dashboard():
             )
             
             if res['status'] == 'success' and res['data'].get('close'):
-                # Latest Price (LTP)
                 ltp = res['data']['close'][-1]
-                
-                # Calculate Change: 
-                # We need the close of the *previous* trading day.
-                # Since we fetched 4 days, we can roughly grab a candle from 1 day ago (approx 375 minutes back)
-                # or just use the very first candle of the fetched series if the series is short.
                 data_len = len(res['data']['close'])
-                prev_idx = max(0, data_len - 375) # Approx 1 day ago in minutes
+                prev_idx = max(0, data_len - 375) 
                 prev_price = res['data']['close'][prev_idx]
                 
                 chg = ltp - prev_price
@@ -214,6 +197,7 @@ def refreshable_dashboard():
         except:
             data_display[item['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
 
+    # Layout: 4 Columns (Nifty, BankNifty, Sensex, Bias)
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     
     with c1:
@@ -242,7 +226,7 @@ def refreshable_dashboard():
         """, unsafe_allow_html=True)
 
 
-# --- 9. SCANNER (TABBED) ---
+# --- 10. SCANNER (TABBED) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     st.markdown("---")
@@ -251,9 +235,8 @@ def refreshable_scanner():
     
     target_symbols = list(FNO_MAP.keys()) 
     
-    # If Master List failed, target_symbols might be empty.
     if not target_symbols:
-        st.error("Scanner Error: No F&O symbols found. Please check API connection or Master List status.")
+        st.warning("Scanner: No F&O symbols found. Please upload 'dhan_master.csv'.")
         return
 
     progress_bar = st.progress(0, f"Scanning {len(target_symbols)} Futures...")
@@ -270,7 +253,6 @@ def refreshable_scanner():
             df = fetch_futures_data(sec_id, interval=60)
             
             if not df.empty and len(df) > 20:
-                # Indicators
                 df['RSI'] = ta.rsi(df['Close'], length=14)
                 adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
                 df['EMA_5'] = ta.ema(df['Close'], length=5)
@@ -284,7 +266,6 @@ def refreshable_scanner():
                 mom_pct = round(((ltp - df['EMA_5'].iloc[-1]) / df['EMA_5'].iloc[-1]) * 100, 2)
                 price_chg = round(((ltp - prev['Close']) / prev['Close']) * 100, 2)
                 
-                # OI Logic
                 oi_chg_pct = 0.0
                 if prev['OI'] > 0:
                     oi_chg_pct = round(((curr['OI'] - prev['OI']) / prev['OI']) * 100, 2)
@@ -302,12 +283,10 @@ def refreshable_scanner():
                     "Analysis": sentiment
                 }
                 
-                # Add to Master Data (Tab 2)
                 row_master = row.copy()
                 row_master['CleanSym'] = sym
                 all_data_list.append(row_master)
                 
-                # Filters (Tab 1)
                 if price_chg > 0.5 and curr_rsi > 60 and curr_adx > 20:
                     bullish_list.append(row)
                 elif price_chg < -0.5 and curr_rsi < 45 and curr_adx > 20:
@@ -315,7 +294,6 @@ def refreshable_scanner():
                     
         except: pass
         progress_bar.progress((i + 1) / len(target_symbols))
-        # time.sleep(0.05) # Uncomment if hitting rate limits
         
     progress_bar.empty()
     
@@ -325,7 +303,6 @@ def refreshable_scanner():
         "Price Chg%": st.column_config.NumberColumn("Price Chg%", format="%.2f%%")
     }
     
-    # Tab 1
     with tab1:
         c1, c2 = st.columns(2)
         with c1:
@@ -339,7 +316,6 @@ def refreshable_scanner():
                 st.dataframe(pd.DataFrame(bearish_list).sort_values(by="Mom %", ascending=True).head(15), use_container_width=True, hide_index=True, column_config=col_config)
             else: st.info("No bearish setups found.")
 
-    # Tab 2
     with tab2:
         st.info(f"📋 Showing Data for all {len(all_data_list)} F&O Symbols")
         if all_data_list:
@@ -348,17 +324,11 @@ def refreshable_scanner():
         else:
             st.warning("No data available.")
 
-    # Footer
     ist_time = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%H:%M:%S')
     st.write(f"🕒 **Last Data Sync:** {ist_time} IST")
-    st.markdown("""
-        <div style='text-align: center; color: grey; padding-top: 20px;'>
-            Powered by : i-Tech World
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown("<div style='text-align: center; color: grey; padding-top: 20px;'>Powered by : i-Tech World</div>", unsafe_allow_html=True)
 
-# --- 10. MAIN APP EXECUTION ---
+# --- 10. EXECUTION ---
 if dhan:
-    # These two functions now run INDEPENDENTLY at their own speeds
     refreshable_dashboard() 
     refreshable_scanner()
