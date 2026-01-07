@@ -44,8 +44,7 @@ try:
     dhan = dhanhq(client_id, access_token)
 except Exception as e: st.error(f"API Error: {e}"); st.stop()
 
-# --- 5. INDEX CONFIGURATION (CORRECTED) ---
-# Verified from your CSV: Sensex ID is 51, Segment is IDX_I
+# --- 5. INDEX CONFIGURATION ---
 INDEX_CONFIG = {
     'NIFTY': {'id': '13', 'seg': 'IDX_I', 'name': 'NIFTY 50'}, 
     'BANKNIFTY': {'id': '25', 'seg': 'IDX_I', 'name': 'BANK NIFTY'}, 
@@ -113,26 +112,39 @@ def get_trend_analysis(price_chg, vol_ratio):
     if price_chg < 0: return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 9. DASHBOARD (UNIFIED LOGIC) ---
+# --- 9. DASHBOARD (FIXED MATH LOGIC) ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
     
     for key, info in INDEX_CONFIG.items():
         try:
-            # Universal Fetcher for All Indices (Now that ID is correct)
+            # Using CHART Data (Proven to work for LTP)
             to_d = datetime.now().strftime('%Y-%m-%d')
             from_d = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
             r = dhan.intraday_minute_data(info['id'], info['seg'], "INDEX", from_d, to_d, 1)
             
             if r['status'] == 'success' and r['data'].get('close'):
                 closes = r['data']['close']
+                times = r['data']['start_Time']
                 ltp = closes[-1]
-                lookback_idx = max(0, len(closes) - 375)
-                prev = closes[lookback_idx]
-                if prev == 0: prev = ltp
-                chg = ltp - prev
-                pct = (chg / prev) * 100
+                
+                # --- NEW LOGIC: FIND YESTERDAY'S CLOSE CORRECTLY ---
+                # 1. Identify Today's Date from the last candle
+                last_date_str = str(times[-1])[:10]
+                
+                # 2. Loop backwards to find the first candle with a DIFFERENT date
+                prev_close = ltp # Default fallback
+                for i in range(len(times)-2, -1, -1):
+                    curr_date_str = str(times[i])[:10]
+                    if curr_date_str != last_date_str:
+                        prev_close = closes[i] # Found it!
+                        break
+                
+                # 3. Calculate Change
+                if prev_close == 0: prev_close = ltp
+                chg = ltp - prev_close
+                pct = (chg / prev_close) * 100
                 data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
             else:
                 data[info['name']] = {"ltp": 0.0, "chg": 0.0, "pct": 0.0}
