@@ -234,9 +234,35 @@ def get_oi_signal(oi_chg, day_price_chg):
         return "Long Unwinding 🟠"
     return "No Clear OI ⚪"
 
-# --- 12. SCANNER WITH OI + FALLBACK ---
+# --- 12. SIGNAL HISTORY FOR STRENGTH (SESSION-BASED) ---
+def init_signal_history():
+    if "signal_history" not in st.session_state:
+        st.session_state["signal_history"] = {
+            "bull": {},  # {symbol: {"first_seen": datetime, "last_seen": datetime}}
+            "bear": {},
+        }
+
+def update_signal_history(side, symbol, now):
+    h = st.session_state["signal_history"][side]
+    if symbol not in h:
+        h[symbol] = {"first_seen": now, "last_seen": now}
+    else:
+        h[symbol]["last_seen"] = now
+
+def get_strength_minutes(side, symbol, now):
+    h = st.session_state["signal_history"][side]
+    rec = h.get(symbol)
+    if not rec:
+        return 0.0
+    delta = now - rec["first_seen"]
+    return round(delta.total_seconds() / 60.0, 1)
+
+# --- 13. SCANNER WITH OI + FALLBACK + STRENGTH ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
+    init_signal_history()
+    now_scan = datetime.now(IST)
+
     st.markdown("---")
     st.caption(
         f"Scanning {len(FNO_MAP)} symbols (uses OI when available, else price/RSI)... "
@@ -252,14 +278,14 @@ def refreshable_scanner():
     bar = st.progress(0)
     bull, bear, all_data = [], [], []
 
-    today = datetime.now(IST).date()
+    today = now_scan.date()
 
     for i, sym in enumerate(targets):
         try:
             sid = FNO_MAP[sym]['id']
 
-            to_d = datetime.now(IST).strftime('%Y-%m-%d')
-            from_d = (datetime.now(IST) - timedelta(days=5)).strftime('%Y-%m-%d')
+            to_d = now_scan.strftime('%Y-%m-%d')
+            from_d = (now_scan - timedelta(days=5)).strftime('%Y-%m-%d')
             res = dhan.intraday_minute_data(
                 str(sid), "NSE_FNO", "FUTSTK", from_d, to_d, 60
             )
@@ -373,7 +399,9 @@ def refreshable_scanner():
 
                 intraday_sent = get_trend_analysis(p_chg, vol_ratio)
 
+                # Store raw symbol for strength tracking
                 row = {
+                    "Sym": sym,  # internal use
                     "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
                     "LTP": round(ltp, 2),
                     "Mom %": mom,
@@ -391,20 +419,43 @@ def refreshable_scanner():
                 r_m["Sort"] = sym
                 all_data.append(r_m)
 
-                # --- SIGNAL LOGIC ---
+                # --- SIGNAL LOGIC + STRENGTH ---
+                # Use OI-backed logic when OI exists
                 if oi_available and "Buildup" in oi_signal:
-                    # Use OI-backed logic when we actually have OI
                     if day_price_chg > 0 and p_chg > 0:
-                        bull.append(row)
+                        update_signal_history("bull", sym, now_scan)
+                        bull_row = row.copy()
+                        bull_row["Strength (min)"] = get_strength_minutes(
+                            "bull", sym, now_scan
+                        )
+                        bull.append(bull_row)
+
                     if day_price_chg < 0 and p_chg < 0:
-                        bear.append(row)
+                        update_signal_history("bear", sym, now_scan)
+                        bear_row = row.copy()
+                        bear_row["Strength (min)"] = get_strength_minutes(
+                            "bear", sym, now_scan
+                        )
+                        bear.append(bear_row)
+
+                # Fallback: technical‑only logic if no OI data
                 elif not oi_available:
-                    # FALLBACK: original technical-only scanner
                     if curr_rsi > 0:
                         if p_chg > 0.3 and curr_rsi > 55 and vol_ratio > 1.1:
-                            bull.append(row)
+                            update_signal_history("bull", sym, now_scan)
+                            bull_row = row.copy()
+                            bull_row["Strength (min)"] = get_strength_minutes(
+                                "bull", sym, now_scan
+                            )
+                            bull.append(bull_row)
+
                         elif p_chg < -0.3 and curr_rsi < 52 and vol_ratio > 1.1:
-                            bear.append(row)
+                            update_signal_history("bear", sym, now_scan)
+                            bear_row = row.copy()
+                            bear_row["Strength (min)"] = get_strength_minutes(
+                                "bear", sym, now_scan
+                            )
+                            bear.append(bear_row)
 
             elif res.get('remarks', '') == 'Too Many Requests':
                 time.sleep(1.5)
@@ -432,6 +483,9 @@ def refreshable_scanner():
         "ADX": st.column_config.NumberColumn("ADX", format="%.1f"),
         "Vol Ratio": st.column_config.NumberColumn("Vol x", format="%.1fx"),
         "OI Chg%": st.column_config.NumberColumn("OI Chg%", format="%.2f%%"),
+        "Strength (min)": st.column_config.NumberColumn(
+            "Strength (min)", format="%.1f"
+        ),
         "OI Signal": st.column_config.TextColumn("OI Signal", width="medium"),
         "Analysis": st.column_config.TextColumn("Analysis", width="medium"),
     }
@@ -439,10 +493,13 @@ def refreshable_scanner():
     with tab1:
         c1, c2 = st.columns(2)
         with c1:
-            st.success(f"🟢 BULLS ({len(bull)}) – OI or Tech-backed")
+            st.success(f"🟢 BULLS ({len(bull)}) – OI/Tech-backed")
             if bull:
+                df_bull = pd.DataFrame(bull)
+                # Hide internal Sym
+                df_bull = df_bull.drop(columns=["Sym"], errors="ignore")
                 st.dataframe(
-                    pd.DataFrame(bull).sort_values("Mom %", ascending=False).head(20),
+                    df_bull.sort_values("Strength (min)", ascending=False).head(20),
                     use_container_width=True,
                     hide_index=True,
                     column_config=cfg,
@@ -450,10 +507,12 @@ def refreshable_scanner():
             else:
                 st.info("No bullish setups as per current criteria.")
         with c2:
-            st.error(f"🔴 BEARS ({len(bear)}) – OI or Tech-backed")
+            st.error(f"🔴 BEARS ({len(bear)}) – OI/Tech-backed")
             if bear:
+                df_bear = pd.DataFrame(bear)
+                df_bear = df_bear.drop(columns=["Sym"], errors="ignore")
                 st.dataframe(
-                    pd.DataFrame(bear).sort_values("Mom %", ascending=True).head(20),
+                    df_bear.sort_values("Strength (min)", ascending=False).head(20),
                     use_container_width=True,
                     hide_index=True,
                     column_config=cfg,
@@ -463,8 +522,10 @@ def refreshable_scanner():
 
     with tab2:
         if all_data:
+            df_all = pd.DataFrame(all_data).sort_values("Sort")
+            df_all = df_all.drop(columns=["Sort", "Sym"], errors="ignore")
             st.dataframe(
-                pd.DataFrame(all_data).sort_values("Sort").drop(columns=["Sort"]),
+                df_all,
                 use_container_width=True,
                 hide_index=True,
                 column_config=cfg,
@@ -473,13 +534,13 @@ def refreshable_scanner():
         else:
             st.warning("No data found.")
 
-    st.write(f"🕒 **Last Data Sync:** {datetime.now(IST).strftime('%H:%M:%S')} IST")
+    st.write(f"🕒 **Last Data Sync:** {now_scan.strftime('%H:%M:%S')} IST")
     st.markdown(
         "<div style='text-align: center; color: grey;'>Powered by : i-Tech World</div>",
         unsafe_allow_html=True,
     )
 
-# --- 13. RUN APP ---
+# --- 14. RUN APP ---
 if dhan:
     refreshable_dashboard()
     refreshable_scanner()
