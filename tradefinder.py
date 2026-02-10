@@ -6,9 +6,11 @@ import pytz
 from datetime import datetime, timedelta
 import time
 import os
+import requests  # NEW: for direct v2 HTTP calls
+import json
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="iTW's Live F&O Screener Pro + OI", layout="wide")
+st.set_page_config(page_title="iTW's Live F&O Screener Pro + OI (v2)", layout="wide")
 IST = pytz.timezone('Asia/Kolkata')  # Force IST Timezone
 
 # --- 2. AUTHENTICATION ---
@@ -48,22 +50,24 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN UI ---
-st.title("🚀 iTW's Live F&O Screener Pro + OI Analysis")
+st.title("🚀 iTW's Live F&O Screener Pro + OI (Dhan v2)")
 if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-# --- 4. API CONNECTION ---
+# --- 4. API CONNECTION (v1 client still used for some calls) ---
 dhan = None
 try:
     client_id = st.secrets["DHAN_CLIENT_ID"]
-    access_token = st.secrets["DHAN_ACCESS_TOKEN"]
+    access_token = st.secrets["DHAN_ACCESS_TOKEN"]  # used for v1 & v2
     dhan = dhanhq(client_id, access_token)
 except Exception as e:
     st.error(f"API Error: {e}")
     st.stop()
 
-# --- 5. INDEX MAP (Standardized) ---
+DHAN_V2_BASE = "https://api.dhan.co/v2"  # v2 REST base URL [web:42]
+
+# --- 5. INDEX MAP ---
 INDEX_MAP = {
     'NIFTY': {'id': '13', 'name': 'NIFTY 50'},
     'BANKNIFTY': {'id': '25', 'name': 'BANK NIFTY'},
@@ -120,7 +124,7 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. HELPER: GET YESTERDAY'S CLOSE ---
+# --- 7. DAILY HELPERS (still v1, index-only) ---
 def get_prev_close(security_id):
     try:
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
@@ -145,14 +149,12 @@ def get_prev_close(security_id):
         pass
     return 0.0
 
-# --- 8. HELPER: GET LIVE PRICE ---
 def get_live_price(security_id):
     try:
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
         from_d = (datetime.now(IST) - timedelta(days=3)).strftime('%Y-%m-%d')
 
         res = dhan.intraday_minute_data(str(security_id), "IDX_I", "INDEX", from_d, to_d, 1)
-
         if res.get('status') == 'success' and 'data' in res:
             closes = res['data']['close']
             if len(closes) > 0:
@@ -161,7 +163,7 @@ def get_live_price(security_id):
         pass
     return 0.0
 
-# --- 9. DASHBOARD (INDICES) ---
+# --- 8. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
@@ -209,7 +211,7 @@ def refreshable_dashboard():
             unsafe_allow_html=True,
         )
 
-# --- 10. SIMPLE PRICE/VOLUME SENTIMENT ---
+# --- 9. SIMPLE SENTIMENT ---
 def get_trend_analysis(price_chg, vol_ratio):
     if price_chg > 0 and vol_ratio > 1.2:
         return "Bullish (Vol) 🟢"
@@ -221,9 +223,8 @@ def get_trend_analysis(price_chg, vol_ratio):
         return "Mild Bearish ↘️"
     return "Neutral ⚪"
 
-# --- 11. OI SIGNAL (USED ONLY IF OI EXISTS) ---
+# --- 10. OI SIGNAL ---
 def get_oi_signal(oi_chg, day_price_chg):
-    # Softer thresholds to pick up genuine buildups
     if oi_chg > 2 and day_price_chg > 0.5:
         return "Long Buildup 🟢"
     if oi_chg > 2 and day_price_chg < -0.5:
@@ -234,13 +235,10 @@ def get_oi_signal(oi_chg, day_price_chg):
         return "Long Unwinding 🟠"
     return "No Clear OI ⚪"
 
-# --- 12. SIGNAL HISTORY FOR STRENGTH (SESSION-BASED) ---
+# --- 11. STRENGTH STORAGE ---
 def init_signal_history():
     if "signal_history" not in st.session_state:
-        st.session_state["signal_history"] = {
-            "bull": {},  # {symbol: {"first_seen": datetime, "last_seen": datetime}}
-            "bear": {},
-        }
+        st.session_state["signal_history"] = {"bull": {}, "bear": {}}
 
 def update_signal_history(side, symbol, now):
     h = st.session_state["signal_history"][side]
@@ -257,7 +255,77 @@ def get_strength_minutes(side, symbol, now):
     delta = now - rec["first_seen"]
     return round(delta.total_seconds() / 60.0, 1)
 
-# --- 13. SCANNER WITH OI + FALLBACK + STRENGTH ---
+# --- 12. v2 INTRADAY FETCH WITH OI ---
+def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
+    """
+    Uses Dhan v2 /charts/intraday to get OHLC + Volume + OI for FUTSTK [web:42].
+    Returns a DataFrame with datetime (IST), Open, High, Low, Close, Volume, OI.
+    """
+    url = f"{DHAN_V2_BASE}/charts/intraday"
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "access-token": access_token,
+    }
+    payload = {
+        "securityId": str(security_id),
+        "exchangeSegment": "NSE_FNO",
+        "instrument": "FUTSTK",
+        "expiryCode": 0,          # 0 works when securityId already points to a specific contract
+        "oi": True,               # request OI data [web:42]
+        "fromDate": from_d,
+        "toDate": to_d,
+        "interval": int(interval_min),
+    }
+
+    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=5)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # v2 returns arrays: open, high, low, close, volume, timestamp, open_interest [web:42]
+    closes = data.get("close", [])
+    if not closes:
+        return pd.DataFrame()
+
+    opens = data.get("open", [])
+    highs = data.get("high", [])
+    lows = data.get("low", [])
+    vols = data.get("volume", [])
+    ts = data.get("timestamp", [])
+    oi = data.get("open_interest", [])
+
+    n = len(closes)
+    # Ensure all lists are same length
+    def safe_list(lst):
+        return lst if len(lst) == n else (lst + [lst[-1]] * (n - len(lst)) if lst else [0] * n)
+
+    opens = safe_list(opens)
+    highs = safe_list(highs)
+    lows = safe_list(lows)
+    vols = safe_list(vols)
+    ts = safe_list(ts)
+    oi = safe_list(oi)
+
+    dt_index = [
+        datetime.fromtimestamp(t, tz=IST) if isinstance(t, (int, float)) else
+        datetime.fromtimestamp(float(t), tz=IST)
+        for t in ts
+    ]
+
+    df = pd.DataFrame(
+        {
+            "datetime": dt_index,
+            "Open": opens,
+            "High": highs,
+            "Low": lows,
+            "Close": closes,
+            "Volume": vols,
+            "OI": oi,
+        }
+    )
+    return df
+
+# --- 13. SCANNER (uses v2 + strength) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     init_signal_history()
@@ -265,7 +333,7 @@ def refreshable_scanner():
 
     st.markdown("---")
     st.caption(
-        f"Scanning {len(FNO_MAP)} symbols (uses OI when available, else price/RSI)... "
+        f"Scanning {len(FNO_MAP)} symbols using Dhan v2 intraday (with OI where available)... "
         f"(Updates every 3 mins)"
     )
 
@@ -286,151 +354,138 @@ def refreshable_scanner():
 
             to_d = now_scan.strftime('%Y-%m-%d')
             from_d = (now_scan - timedelta(days=5)).strftime('%Y-%m-%d')
-            res = dhan.intraday_minute_data(
-                str(sid), "NSE_FNO", "FUTSTK", from_d, to_d, 60
-            )
 
-            if res.get('status') == 'success' and res.get('data'):
-                raw_df = pd.DataFrame(res['data'])
+            try:
+                df = fetch_intraday_v2_futstk(sid, from_d, to_d, interval_min=60)
+            except Exception:
+                df = pd.DataFrame()
 
-                # Does raw response actually have 'oi'?
-                raw_has_oi = 'oi' in raw_df.columns
+            if df.empty:
+                continue
 
-                rename_map = {
-                    'start_Time': 'datetime',
-                    'timestamp': 'datetime',
-                    'open': 'Open',
-                    'high': 'High',
-                    'low': 'Low',
-                    'close': 'Close',
-                    'volume': 'Volume',
-                }
-                if raw_has_oi:
-                    rename_map['oi'] = 'OI'
+            # --- TECH INDICATORS ---
+            if len(df) >= 14:
+                df['RSI'] = ta.rsi(df['Close'], 14)
+                adx_df = ta.adx(df['High'], df['Low'], df['Close'], 14)
+                df['ADX'] = adx_df['ADX_14']
+                curr_rsi = float(df['RSI'].iloc[-1])
+                curr_adx = float(df['ADX'].iloc[-1])
+            else:
+                curr_rsi = 0.0
+                curr_adx = 0.0
 
-                df = raw_df.rename(columns=rename_map)
-
-                if df.empty or 'datetime' not in df.columns:
-                    continue
-
-                df['datetime'] = pd.to_datetime(df['datetime'])
-
-                if 'Volume' not in df.columns:
-                    df['Volume'] = 0
-
-                if raw_has_oi and 'OI' in df.columns:
-                    oi_available = not (df['OI'].max() == 0 and df['OI'].min() == 0)
-                else:
-                    df['OI'] = 0
-                    oi_available = False
-
-                # --- TECH INDICATORS ---
-                if len(df) >= 14:
-                    df['RSI'] = ta.rsi(df['Close'], 14)
-                    adx_df = ta.adx(df['High'], df['Low'], df['Close'], 14)
-                    df['ADX'] = adx_df['ADX_14']
-                    curr_rsi = float(df['RSI'].iloc[-1])
-                    curr_adx = float(df['ADX'].iloc[-1])
-                else:
-                    curr_rsi = 0.0
-                    curr_adx = 0.0
-
-                if len(df) >= 5:
-                    df['EMA'] = ta.ema(df['Close'], 5)
-                    mom = round(
-                        ((df['Close'].iloc[-1] - df['EMA'].iloc[-1]) / df['EMA'].iloc[-1])
-                        * 100,
-                        2,
-                    )
-                else:
-                    mom = 0.0
-
-                curr_vol = float(df['Volume'].iloc[-1])
-                avg_vol = (
-                    df['Volume'].rolling(10).mean().iloc[-1]
-                    if len(df) > 10
-                    else curr_vol
+            if len(df) >= 5:
+                df['EMA'] = ta.ema(df['Close'], 5)
+                mom = round(
+                    ((df['Close'].iloc[-1] - df['EMA'].iloc[-1]) / df['EMA'].iloc[-1]) * 100,
+                    2,
                 )
-                vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
+            else:
+                mom = 0.0
 
-                curr = df.iloc[-1]
-                ltp = float(curr['Close'])
+            curr_vol = float(df['Volume'].iloc[-1])
+            avg_vol = (
+                df['Volume'].rolling(10).mean().iloc[-1]
+                if len(df) > 10
+                else curr_vol
+            )
+            vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
 
-                if len(df) > 1:
-                    prev = df.iloc[-2]
-                    p_chg = round(
-                        ((ltp - prev['Close']) / prev['Close']) * 100,
-                        2,
-                    )
-                else:
-                    p_chg = 0.0
+            curr = df.iloc[-1]
+            ltp = float(curr['Close'])
 
-                # --- INTRADAY OI & PRICE CHANGE ---
-                if oi_available:
-                    day_df = df[df['datetime'].dt.date == today]
-                    if len(day_df) >= 2:
-                        day_first = day_df.iloc[0]
-                        day_last = day_df.iloc[-1]
+            if len(df) > 1:
+                prev = df.iloc[-2]
+                p_chg = round(
+                    ((ltp - prev['Close']) / prev['Close']) * 100,
+                    2,
+                )
+            else:
+                p_chg = 0.0
 
-                        oi_start = float(day_first.get('OI', 0) or 0)
-                        oi_end = float(day_last.get('OI', 0) or 0)
-                        if oi_start > 0:
-                            oi_chg = round(((oi_end - oi_start) / oi_start) * 100, 2)
-                        else:
-                            oi_chg = 0.0
+            # --- INTRADAY OI & PRICE CHANGE FOR TODAY ---
+            oi_available = not (df['OI'].max() == 0 and df['OI'].min() == 0)
 
-                        price_start = float(day_first['Close'])
-                        if price_start > 0:
-                            day_price_chg = round(
-                                ((ltp - price_start) / price_start) * 100,
-                                2,
-                            )
-                        else:
-                            day_price_chg = 0.0
+            if oi_available:
+                day_df = df[df['datetime'].dt.date == today]
+                if len(day_df) >= 2:
+                    day_first = day_df.iloc[0]
+                    day_last = day_df.iloc[-1]
+
+                    oi_start = float(day_first.get('OI', 0) or 0)
+                    oi_end = float(day_last.get('OI', 0) or 0)
+                    if oi_start > 0:
+                        oi_chg = round(((oi_end - oi_start) / oi_start) * 100, 2)
                     else:
                         oi_chg = 0.0
-                        day_price_chg = 0.0
 
-                    oi_signal = get_oi_signal(oi_chg, day_price_chg)
+                    price_start = float(day_first['Close'])
+                    if price_start > 0:
+                        day_price_chg = round(
+                            ((ltp - price_start) / price_start) * 100,
+                            2,
+                        )
+                    else:
+                        day_price_chg = 0.0
                 else:
                     oi_chg = 0.0
                     day_price_chg = 0.0
-                    oi_signal = "No OI Data ❔"
 
-                intraday_sent = get_trend_analysis(p_chg, vol_ratio)
+                oi_signal = get_oi_signal(oi_chg, day_price_chg)
+            else:
+                oi_chg = 0.0
+                day_price_chg = 0.0
+                oi_signal = "No OI Data ❔"
 
-                # Store raw symbol for strength tracking
-                row = {
-                    "Sym": sym,  # internal use
-                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
-                    "LTP": round(ltp, 2),
-                    "Mom %": mom,
-                    "Price Chg%": p_chg,
-                    "Day Price%": day_price_chg,
-                    "RSI": round(curr_rsi, 1),
-                    "ADX": round(curr_adx, 1),
-                    "Vol Ratio": round(vol_ratio, 1),
-                    "OI Chg%": oi_chg,
-                    "OI Signal": oi_signal,
-                    "Analysis": intraday_sent,
-                }
+            intraday_sent = get_trend_analysis(p_chg, vol_ratio)
 
-                r_m = row.copy()
-                r_m["Sort"] = sym
-                all_data.append(r_m)
+            row = {
+                "Sym": sym,  # internal
+                "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
+                "LTP": round(ltp, 2),
+                "Mom %": mom,
+                "Price Chg%": p_chg,
+                "Day Price%": day_price_chg,
+                "RSI": round(curr_rsi, 1),
+                "ADX": round(curr_adx, 1),
+                "Vol Ratio": round(vol_ratio, 1),
+                "OI Chg%": oi_chg,
+                "OI Signal": oi_signal,
+                "Analysis": intraday_sent,
+            }
 
-                # --- SIGNAL LOGIC + STRENGTH ---
-                # Use OI-backed logic when OI exists
-                if oi_available and "Buildup" in oi_signal:
-                    if day_price_chg > 0 and p_chg > 0:
+            r_m = row.copy()
+            r_m["Sort"] = sym
+            all_data.append(r_m)
+
+            # --- SIGNAL LOGIC + STRENGTH ---
+            if oi_available and "Buildup" in oi_signal:
+                if day_price_chg > 0 and p_chg > 0:
+                    update_signal_history("bull", sym, now_scan)
+                    bull_row = row.copy()
+                    bull_row["Strength (min)"] = get_strength_minutes(
+                        "bull", sym, now_scan
+                    )
+                    bull.append(bull_row)
+
+                if day_price_chg < 0 and p_chg < 0:
+                    update_signal_history("bear", sym, now_scan)
+                    bear_row = row.copy()
+                    bear_row["Strength (min)"] = get_strength_minutes(
+                        "bear", sym, now_scan
+                    )
+                    bear.append(bear_row)
+            else:
+                # fallback: no OI yet, use technical‑only
+                if curr_rsi > 0:
+                    if p_chg > 0.3 and curr_rsi > 55 and vol_ratio > 1.1:
                         update_signal_history("bull", sym, now_scan)
                         bull_row = row.copy()
                         bull_row["Strength (min)"] = get_strength_minutes(
                             "bull", sym, now_scan
                         )
                         bull.append(bull_row)
-
-                    if day_price_chg < 0 and p_chg < 0:
+                    elif p_chg < -0.3 and curr_rsi < 52 and vol_ratio > 1.1:
                         update_signal_history("bear", sym, now_scan)
                         bear_row = row.copy()
                         bear_row["Strength (min)"] = get_strength_minutes(
@@ -438,30 +493,7 @@ def refreshable_scanner():
                         )
                         bear.append(bear_row)
 
-                # Fallback: technical‑only logic if no OI data
-                elif not oi_available:
-                    if curr_rsi > 0:
-                        if p_chg > 0.3 and curr_rsi > 55 and vol_ratio > 1.1:
-                            update_signal_history("bull", sym, now_scan)
-                            bull_row = row.copy()
-                            bull_row["Strength (min)"] = get_strength_minutes(
-                                "bull", sym, now_scan
-                            )
-                            bull.append(bull_row)
-
-                        elif p_chg < -0.3 and curr_rsi < 52 and vol_ratio > 1.1:
-                            update_signal_history("bear", sym, now_scan)
-                            bear_row = row.copy()
-                            bear_row["Strength (min)"] = get_strength_minutes(
-                                "bear", sym, now_scan
-                            )
-                            bear.append(bear_row)
-
-            elif res.get('remarks', '') == 'Too Many Requests':
-                time.sleep(1.5)
-
         except Exception:
-            # Skip any symbol that errors out
             pass
 
         time.sleep(0.12)
@@ -495,9 +527,7 @@ def refreshable_scanner():
         with c1:
             st.success(f"🟢 BULLS ({len(bull)}) – OI/Tech-backed")
             if bull:
-                df_bull = pd.DataFrame(bull)
-                # Hide internal Sym
-                df_bull = df_bull.drop(columns=["Sym"], errors="ignore")
+                df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
                 st.dataframe(
                     df_bull.sort_values("Strength (min)", ascending=False).head(20),
                     use_container_width=True,
@@ -509,8 +539,7 @@ def refreshable_scanner():
         with c2:
             st.error(f"🔴 BEARS ({len(bear)}) – OI/Tech-backed")
             if bear:
-                df_bear = pd.DataFrame(bear)
-                df_bear = df_bear.drop(columns=["Sym"], errors="ignore")
+                df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
                 st.dataframe(
                     df_bear.sort_values("Strength (min)", ascending=False).head(20),
                     use_container_width=True,
