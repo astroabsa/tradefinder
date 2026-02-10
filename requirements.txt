@@ -6,3 +6,5 @@ streamlit
 pandas
 dhanhq
 openpyxl
+pytz
+requests
