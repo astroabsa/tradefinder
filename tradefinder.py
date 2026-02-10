@@ -521,33 +521,35 @@ def refreshable_scanner():
         "OI Signal": st.column_config.TextColumn("OI Signal", width="medium"),
         "Analysis": st.column_config.TextColumn("Analysis", width="medium"),
     }
-
     with tab1:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.success(f"🟢 BULLS ({len(bull)}) – OI/Tech-backed")
-            if bull:
-                df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
-                st.dataframe(
-                    df_bull.sort_values("Strength (min)", ascending=False).head(20),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=cfg,
-                )
-            else:
-                st.info("No bullish setups as per current criteria.")
-        with c2:
-            st.error(f"🔴 BEARS ({len(bear)}) – OI/Tech-backed")
-            if bear:
-                df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
-                st.dataframe(
-                    df_bear.sort_values("Strength (min)", ascending=False).head(20),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config=cfg,
-                )
-            else:
-                st.info("No bearish setups as per current criteria.")
+        # --- BULLS TABLE (TOP) ---
+        st.success(f"🟢 BULLS ({len(bull)}) – OI/Tech-backed")
+        if bull:
+            df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
+            st.dataframe(
+                df_bull.sort_values("Strength (min)", ascending=False).head(20),
+                use_container_width=True,
+                hide_index=True,
+                column_config=cfg,
+            )
+        else:
+            st.info("No bullish setups as per current criteria.")
+
+        # Small separator line between the two tables
+        st.markdown("---")
+
+        # --- BEARS TABLE (BOTTOM) ---
+        st.error(f"🔴 BEARS ({len(bear)}) – OI/Tech-backed")
+        if bear:
+            df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
+            st.dataframe(
+                df_bear.sort_values("Strength (min)", ascending=False).head(20),
+                use_container_width=True,
+                hide_index=True,
+                column_config=cfg,
+            )
+        else:
+            st.info("No bearish setups as per current criteria.")
 
     with tab2:
         if all_data:
