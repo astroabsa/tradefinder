@@ -6,7 +6,7 @@ import pytz
 from datetime import datetime, timedelta
 import time
 import os
-import requests  # NEW: for direct v2 HTTP calls
+import requests  # for direct v2 HTTP calls
 import json
 
 # --- 1. CONFIGURATION ---
@@ -65,7 +65,7 @@ except Exception as e:
     st.error(f"API Error: {e}")
     st.stop()
 
-DHAN_V2_BASE = "https://api.dhan.co/v2"  # v2 REST base URL [web:42]
+DHAN_V2_BASE = "https://api.dhan.co/v2"  # v2 REST base URL
 
 # --- 5. INDEX MAP ---
 INDEX_MAP = {
@@ -124,7 +124,7 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DAILY HELPERS (still v1, index-only) ---
+# --- 7. DAILY HELPERS (v1, index-only) ---
 def get_prev_close(security_id):
     try:
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
@@ -258,8 +258,7 @@ def get_strength_minutes(side, symbol, now):
 # --- 12. v2 INTRADAY FETCH WITH OI ---
 def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     """
-    Uses Dhan v2 /charts/intraday to get OHLC + Volume + OI for FUTSTK [web:42].
-    Returns a DataFrame with datetime (IST), Open, High, Low, Close, Volume, OI.
+    Uses Dhan v2 /charts/intraday to get OHLC + Volume + OI for FUTSTK. [web:42]
     """
     url = f"{DHAN_V2_BASE}/charts/intraday"
     headers = {
@@ -271,8 +270,8 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
         "securityId": str(security_id),
         "exchangeSegment": "NSE_FNO",
         "instrument": "FUTSTK",
-        "expiryCode": 0,          # 0 works when securityId already points to a specific contract
-        "oi": True,               # request OI data [web:42]
+        "expiryCode": 0,
+        "oi": True,
         "fromDate": from_d,
         "toDate": to_d,
         "interval": int(interval_min),
@@ -282,7 +281,6 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     resp.raise_for_status()
     data = resp.json()
 
-    # v2 returns arrays: open, high, low, close, volume, timestamp, open_interest [web:42]
     closes = data.get("close", [])
     if not closes:
         return pd.DataFrame()
@@ -295,7 +293,7 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     oi = data.get("open_interest", [])
 
     n = len(closes)
-    # Ensure all lists are same length
+
     def safe_list(lst):
         return lst if len(lst) == n else (lst + [lst[-1]] * (n - len(lst)) if lst else [0] * n)
 
@@ -325,7 +323,7 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     )
     return df
 
-# --- 13. SCANNER (uses v2 + strength) ---
+# --- 13. SCANNER (v2 + strength, stacked tables) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     init_signal_history()
@@ -521,8 +519,9 @@ def refreshable_scanner():
         "OI Signal": st.column_config.TextColumn("OI Signal", width="medium"),
         "Analysis": st.column_config.TextColumn("Analysis", width="medium"),
     }
+
+    # --- stacked layout: Bulls table first, then Bears below ---
     with tab1:
-        # --- BULLS TABLE (TOP) ---
         st.success(f"🟢 BULLS ({len(bull)}) – OI/Tech-backed")
         if bull:
             df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
@@ -535,10 +534,8 @@ def refreshable_scanner():
         else:
             st.info("No bullish setups as per current criteria.")
 
-        # Small separator line between the two tables
         st.markdown("---")
 
-        # --- BEARS TABLE (BOTTOM) ---
         st.error(f"🔴 BEARS ({len(bear)}) – OI/Tech-backed")
         if bear:
             df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
