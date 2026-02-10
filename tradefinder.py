@@ -10,7 +10,7 @@ import requests  # for direct v2 HTTP calls
 import json
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="iTW's Live F&O Screener Pro + OI (v2)", layout="wide")
+st.set_page_config(page_title="iTW's Live F&O Screener Pro", layout="wide")
 IST = pytz.timezone('Asia/Kolkata')  # Force IST Timezone
 
 # --- 2. AUTHENTICATION ---
@@ -50,7 +50,7 @@ if not st.session_state["authenticated"]:
     st.stop()
 
 # --- 3. MAIN UI ---
-st.title("🚀 iTW's Live F&O Screener Pro + OI (Dhan v2)")
+st.title("🚀 iTW's Live F&O Screener Pro")
 if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
