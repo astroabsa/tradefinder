@@ -55,6 +55,8 @@ if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
 
+DEBUG_SHOW_ERRORS = st.sidebar.checkbox("Show API debug info", value=False)
+
 # --- 4. API CONNECTION ---
 dhan = None
 try:
@@ -124,7 +126,7 @@ def get_fno_stock_map():
 with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
-# --- 7. DAILY HELPERS (indices) ---
+# --- 7. DAILY HELPERS (indices & FUTSTK) ---
 def get_prev_close_index(security_id):
     try:
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
@@ -163,7 +165,6 @@ def get_live_price(security_id):
         pass
     return 0.0
 
-# NEW: previous close for FUTSTK (used in scanner Day Price%)
 def get_prev_close_futstk(security_id):
     try:
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
@@ -394,12 +395,23 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
         "interval": int(interval_min),
     }
 
-    resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=5)
-    resp.raise_for_status()
-    data = resp.json()
+    try:
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=5)
+        if DEBUG_SHOW_ERRORS:
+            st.caption(f"v2 status {resp.status_code} for {security_id}")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        if DEBUG_SHOW_ERRORS and "dhan_v2_error_shown" not in st.session_state:
+            st.session_state["dhan_v2_error_shown"] = True
+            st.error(f"Dhan v2 intraday error for {security_id}: {e}")
+        return pd.DataFrame()
 
     closes = data.get("close", [])
     if not closes:
+        if DEBUG_SHOW_ERRORS and "dhan_v2_noclose_shown" not in st.session_state:
+            st.session_state["dhan_v2_noclose_shown"] = True
+            st.warning(f"No intraday closes returned for {security_id}")
         return pd.DataFrame()
 
     opens = data.get("open", [])
@@ -470,12 +482,9 @@ def refreshable_scanner():
             to_d = now_scan.strftime('%Y-%m-%d')
             from_d = (now_scan - timedelta(days=5)).strftime('%Y-%m-%d')
 
-            try:
-                df = fetch_intraday_v2_futstk(sid, from_d, to_d, interval_min=60)
-            except Exception:
-                df = pd.DataFrame()
-
+            df = fetch_intraday_v2_futstk(sid, from_d, to_d, interval_min=60)
             if df.empty:
+                bar.progress((i + 1) / len(targets))
                 continue
 
             # --- TECH INDICATORS ---
@@ -520,7 +529,6 @@ def refreshable_scanner():
 
             # --- PREVIOUS CLOSE FOR FUTSTK (DAILY) ---
             prev_close = get_prev_close_futstk(sid)
-
             if prev_close > 0:
                 day_price_chg = round(((ltp - prev_close) / prev_close) * 100, 2)
             else:
@@ -671,8 +679,10 @@ def refreshable_scanner():
                         bear_row["Conviction"] = conv
                         bear.append(bear_row)
 
-        except Exception:
-            pass
+        except Exception as e:
+            if DEBUG_SHOW_ERRORS and "scan_error_shown" not in st.session_state:
+                st.session_state["scan_error_shown"] = True
+                st.error(f"Error while scanning {sym}: {e}")
 
         time.sleep(0.12)
         bar.progress((i + 1) / len(targets))
@@ -746,7 +756,7 @@ def refreshable_scanner():
                 height=600,
             )
         else:
-            st.warning("No data found.")
+            st.warning("No data found (likely no intraday candles returned by v2 API).")
 
     st.write(f"🕒 **Last Data Sync:** {now_scan.strftime('%H:%M:%S')} IST")
     st.markdown(
