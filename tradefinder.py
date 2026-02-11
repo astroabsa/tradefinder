@@ -714,18 +714,22 @@ def refreshable_scanner():
         "Analysis": st.column_config.TextColumn("Analysis", width="medium"),
     }
 
-    # --- stacked layout: Bulls table first, then Bears below ---
+    # --- stacked layout: Bulls table first, then Bears below (with safe rendering) ---
     with tab1:
         st.success(f"🟢 BULLS ({len(bull)}) – Ranked by Conviction")
         if bull:
-            df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
-            df_bull = df_bull.sort_values("Conviction", ascending=False)
-            st.dataframe(
-                df_bull.head(20),
-                use_container_width=True,
-                hide_index=True,
-                column_config=cfg,
-            )
+            try:
+                df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
+                df_bull = df_bull.sort_values("Conviction", ascending=False)
+                st.dataframe(
+                    df_bull.head(20),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=cfg,
+                )
+            except Exception as e:
+                st.error(f"Error displaying Bulls table: {e}")
+                st.table(pd.DataFrame(bull).head(20))
         else:
             st.info("No bullish setups as per current criteria.")
 
@@ -733,14 +737,18 @@ def refreshable_scanner():
 
         st.error(f"🔴 BEARS ({len(bear)}) – Ranked by Conviction")
         if bear:
-            df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
-            df_bear = df_bear.sort_values("Conviction", ascending=False)
-            st.dataframe(
-                df_bear.head(20),
-                use_container_width=True,
-                hide_index=True,
-                column_config=cfg,
-            )
+            try:
+                df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
+                df_bear = df_bear.sort_values("Conviction", ascending=False)
+                st.dataframe(
+                    df_bear.head(20),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config=cfg,
+                )
+            except Exception as e:
+                st.error(f"Error displaying Bears table: {e}")
+                st.table(pd.DataFrame(bear).head(20))
         else:
             st.info("No bearish setups as per current criteria.")
 
