@@ -714,13 +714,14 @@ def refreshable_scanner():
         "Analysis": st.column_config.TextColumn("Analysis", width="medium"),
     }
 
-    # --- stacked layout: Bulls table first, then Bears below (with safe rendering) ---
+    # --- stacked layout: Bulls table first, then Bears below (defensive rendering) ---
     with tab1:
         st.success(f"🟢 BULLS ({len(bull)}) – Ranked by Conviction")
         if bull:
             try:
                 df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
-                df_bull = df_bull.sort_values("Conviction", ascending=False)
+                if "Conviction" in df_bull.columns:
+                    df_bull = df_bull.sort_values("Conviction", ascending=False)
                 st.dataframe(
                     df_bull.head(20),
                     use_container_width=True,
@@ -739,7 +740,8 @@ def refreshable_scanner():
         if bear:
             try:
                 df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
-                df_bear = df_bear.sort_values("Conviction", ascending=False)
+                if "Conviction" in df_bear.columns:
+                    df_bear = df_bear.sort_values("Conviction", ascending=False)
                 st.dataframe(
                     df_bear.head(20),
                     use_container_width=True,
