@@ -125,7 +125,7 @@ with st.spinner("Loading Stock List..."):
     FNO_MAP = get_fno_stock_map()
 
 # --- 7. DAILY HELPERS (indices) ---
-def get_prev_close(security_id):
+def get_prev_close_index(security_id):
     try:
         to_d = datetime.now(IST).strftime('%Y-%m-%d')
         from_d = (datetime.now(IST) - timedelta(days=10)).strftime('%Y-%m-%d')
@@ -163,6 +163,30 @@ def get_live_price(security_id):
         pass
     return 0.0
 
+# NEW: previous close for FUTSTK (used in scanner Day Price%)
+def get_prev_close_futstk(security_id):
+    try:
+        to_d = datetime.now(IST).strftime('%Y-%m-%d')
+        from_d = (datetime.now(IST) - timedelta(days=10)).strftime('%Y-%m-%d')
+
+        res = dhan.historical_daily_data(str(security_id), "NSE_FNO", "FUTSTK", from_d, to_d)
+        if res.get('status') == 'success' and 'data' in res:
+            df = pd.DataFrame(res['data'])
+            if df.empty:
+                return 0.0
+
+            time_col = 'start_Time' if 'start_Time' in df.columns else 'timestamp'
+            df['date_str'] = df[time_col].astype(str).str[:10]
+
+            today_str = datetime.now(IST).strftime('%Y-%m-%d')
+            past_df = df[df['date_str'] != today_str]
+
+            if not past_df.empty:
+                return float(past_df.iloc[-1]['close'])
+    except Exception:
+        pass
+    return 0.0
+
 # --- 8. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
@@ -171,7 +195,7 @@ def refreshable_dashboard():
     for key, info in INDEX_MAP.items():
         sid = info['id']
 
-        prev = get_prev_close(sid)
+        prev = get_prev_close_index(sid)
         ltp = get_live_price(sid)
 
         if ltp == 0:
@@ -258,8 +282,6 @@ def get_strength_minutes(side, symbol, now):
 # --- 12. CONVICTION SCORING HELPERS ---
 def get_trend_score(side, rsi, adx, mom):
     score = 0
-
-    # ADX contribution
     if adx > 30:
         score += 18
     elif adx > 25:
@@ -267,7 +289,6 @@ def get_trend_score(side, rsi, adx, mom):
     elif adx > 20:
         score += 8
 
-    # RSI zone + momentum
     if side == "bull":
         if 50 <= rsi <= 65:
             score += 15
@@ -277,7 +298,7 @@ def get_trend_score(side, rsi, adx, mom):
             score += 7
         elif mom > 0.3:
             score += 4
-    else:  # bear
+    else:
         if 35 <= rsi <= 50:
             score += 15
         elif 30 <= rsi < 35 or 50 < rsi <= 60:
@@ -287,16 +308,12 @@ def get_trend_score(side, rsi, adx, mom):
         elif mom < -0.3:
             score += 4
 
-    # Penalise extreme RSI
     if rsi > 75 or rsi < 25:
         score -= 5
-
     return max(0, min(score, 40))
 
 def get_participation_score(vol_ratio, oi_chg, oi_signal):
     score = 0
-
-    # Volume
     if vol_ratio >= 2.0:
         score += 15
     elif vol_ratio >= 1.5:
@@ -304,7 +321,6 @@ def get_participation_score(vol_ratio, oi_chg, oi_signal):
     elif vol_ratio >= 1.2:
         score += 5
 
-    # OI
     if "Buildup" in oi_signal:
         if abs(oi_chg) >= 8:
             score += 15
@@ -319,8 +335,6 @@ def get_participation_score(vol_ratio, oi_chg, oi_signal):
 
 def get_persistence_score(strength_min, day_price_chg, p_chg):
     score = 0
-
-    # Time in list
     if strength_min >= 90:
         score += 15
     elif strength_min >= 60:
@@ -330,7 +344,6 @@ def get_persistence_score(strength_min, day_price_chg, p_chg):
     elif strength_min >= 15:
         score += 4
 
-    # Directional persistence
     if abs(day_price_chg) >= 2 and (
         (day_price_chg > 0 and p_chg > 0)
         or (day_price_chg < 0 and p_chg < 0)
@@ -339,7 +352,6 @@ def get_persistence_score(strength_min, day_price_chg, p_chg):
     elif abs(day_price_chg) >= 1:
         score += 6
 
-    # Stalling last bar
     if abs(p_chg) < 0.1:
         score -= 3
 
@@ -506,7 +518,15 @@ def refreshable_scanner():
             else:
                 p_chg = 0.0
 
-            # --- INTRADAY OI & PRICE CHANGE FOR TODAY ---
+            # --- PREVIOUS CLOSE FOR FUTSTK (DAILY) ---
+            prev_close = get_prev_close_futstk(sid)
+
+            if prev_close > 0:
+                day_price_chg = round(((ltp - prev_close) / prev_close) * 100, 2)
+            else:
+                day_price_chg = 0.0
+
+            # --- INTRADAY OI CHANGE FOR TODAY ---
             oi_available = not (df['OI'].max() == 0 and df['OI'].min() == 0)
 
             if oi_available:
@@ -521,23 +541,12 @@ def refreshable_scanner():
                         oi_chg = round(((oi_end - oi_start) / oi_start) * 100, 2)
                     else:
                         oi_chg = 0.0
-
-                    price_start = float(day_first['Close'])
-                    if price_start > 0:
-                        day_price_chg = round(
-                            ((ltp - price_start) / price_start) * 100,
-                            2,
-                        )
-                    else:
-                        day_price_chg = 0.0
                 else:
                     oi_chg = 0.0
-                    day_price_chg = 0.0
 
                 oi_signal = get_oi_signal(oi_chg, day_price_chg)
             else:
                 oi_chg = 0.0
-                day_price_chg = 0.0
                 oi_signal = "No OI Data ❔"
 
             intraday_sent = get_trend_analysis(p_chg, vol_ratio)
@@ -679,7 +688,7 @@ def refreshable_scanner():
         "Price Chg%": st.column_config.NumberColumn(
             "Chg% (Last bar)", format="%.2f%%"
         ),
-        "Day Price%": st.column_config.NumberColumn("Chg% (Today)", format="%.2f%%"),
+        "Day Price%": st.column_config.NumberColumn("Chg% (vs Prev Close)", format="%.2f%%"),
         "RSI": st.column_config.NumberColumn("RSI", format="%.1f"),
         "ADX": st.column_config.NumberColumn("ADX", format="%.1f"),
         "Vol Ratio": st.column_config.NumberColumn("Vol x", format="%.1fx"),
