@@ -59,6 +59,32 @@ if st.sidebar.button("Log out"):
 
 DEBUG_SHOW_ERRORS = st.sidebar.checkbox("Show API / OI debug info", value=False)
 
+# Column visibility controls (indices + stocks)
+INDEX_COL_OPTIONS = [
+    "Index", "LTP", "Mom %", "Price Chg%", "Day Price%",
+    "RSI", "ADX", "Vol Ratio", "OI Chg%", "OI Signal", "Analysis", "Bias",
+]
+STOCK_COL_OPTIONS = [
+    "Symbol", "LTP", "Mom %", "Price Chg%", "Day Price%",
+    "RSI", "ADX", "Vol Ratio", "OI Chg%", "OI Signal",
+    "Analysis", "Strength (min)", "TrendScore", "PartScore",
+    "PersistScore", "Conviction",
+]
+
+with st.sidebar.expander("Table columns"):
+    st.multiselect(
+        "Index columns",
+        INDEX_COL_OPTIONS,
+        default=INDEX_COL_OPTIONS,
+        key="index_cols",
+    )
+    st.multiselect(
+        "Stock columns (Bulls / Bears / All Data)",
+        STOCK_COL_OPTIONS,
+        default=STOCK_COL_OPTIONS,
+        key="stock_cols",
+    )
+
 # --- 4. API CONNECTION ---
 dhan = None
 try:
@@ -560,7 +586,6 @@ def refreshable_scanner():
 
     last = st.session_state["last_scan"]
 
-    # watchdog to avoid stuck state
     if st.session_state["scan_in_progress"] and last is not None:
         stuck_elapsed = (now_scan - last["time"]).total_seconds()
         if stuck_elapsed > MIN_SCAN_GAP_SECONDS * 3:
@@ -580,7 +605,6 @@ def refreshable_scanner():
             st.warning("Scanner paused: No symbols found.")
         return
 
-    # throttling
     last = st.session_state["last_scan"]
     can_start_new = True
     if last is not None:
@@ -593,7 +617,6 @@ def refreshable_scanner():
         or (can_start_new and not st.session_state["scan_in_progress"])
     )
 
-    # --- PERFORM SCAN ONLY WHEN ALLOWED ---
     if do_scan:
         st.session_state["scan_in_progress"] = True
         try:
@@ -716,7 +739,6 @@ def refreshable_scanner():
                     }
                 )
 
-            # optional OI debug
             if DEBUG_SHOW_ERRORS:
                 try:
                     nfut_id = INDEX_FUT_MAP.get("NIFTY")
@@ -966,7 +988,6 @@ def refreshable_scanner():
         finally:
             st.session_state["scan_in_progress"] = False
 
-    # --- RENDER FROM CACHED RESULTS ---
     last = st.session_state["last_scan"]
     if last is None:
         with tab1:
@@ -985,6 +1006,10 @@ def refreshable_scanner():
         st.caption(
             f"Next scan in ~{remaining}s (last scan at {last_time.strftime('%H:%M:%S')} IST)"
         )
+
+    # column selections from sidebar
+    index_cols_sel = st.session_state.get("index_cols", INDEX_COL_OPTIONS)
+    stock_cols_sel = st.session_state.get("stock_cols", STOCK_COL_OPTIONS)
 
     cfg = {
         "Symbol": st.column_config.LinkColumn(
@@ -1017,12 +1042,9 @@ def refreshable_scanner():
         st.subheader("Indices")
         if index_rows:
             df_idx = pd.DataFrame(index_rows)
-            cols = [
-                "Index", "LTP", "Mom %", "Price Chg%", "Day Price%",
-                "RSI", "ADX", "Vol Ratio", "OI Chg%", "OI Signal",
-                "Analysis", "Bias",
-            ]
-            df_idx = df_idx[[c for c in cols if c in df_idx.columns]]
+            cols = [c for c in index_cols_sel if c in df_idx.columns]
+            if cols:
+                df_idx = df_idx[cols]
             st.dataframe(
                 df_idx,
                 use_container_width=True,
@@ -1036,6 +1058,9 @@ def refreshable_scanner():
         st.success(f"🟢 BULLS ({len(bull)}) – Ranked by Conviction")
         if bull:
             df_bull = pd.DataFrame(bull).drop(columns=["Sym"], errors="ignore")
+            cols = [c for c in stock_cols_sel if c in df_bull.columns]
+            if cols:
+                df_bull = df_bull[cols]
             if "Conviction" in df_bull.columns:
                 df_bull = df_bull.sort_values("Conviction", ascending=False)
             st.dataframe(
@@ -1052,6 +1077,9 @@ def refreshable_scanner():
         st.error(f"🔴 BEARS ({len(bear)}) – Ranked by Conviction")
         if bear:
             df_bear = pd.DataFrame(bear).drop(columns=["Sym"], errors="ignore")
+            cols = [c for c in stock_cols_sel if c in df_bear.columns]
+            if cols:
+                df_bear = df_bear[cols]
             if "Conviction" in df_bear.columns:
                 df_bear = df_bear.sort_values("Conviction", ascending=False)
             st.dataframe(
@@ -1067,6 +1095,9 @@ def refreshable_scanner():
         if all_data:
             df_all = pd.DataFrame(all_data).sort_values("Sort")
             df_all = df_all.drop(columns=["Sort", "Sym"], errors="ignore")
+            cols = [c for c in stock_cols_sel if c in df_all.columns]
+            if cols:
+                df_all = df_all[cols]
             st.dataframe(
                 df_all,
                 use_container_width=True,
