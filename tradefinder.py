@@ -187,28 +187,58 @@ with st.spinner("Loading Stock List..."):
 
 # --- 7. DAILY HELPERS (indices & FUTSTK) ---
 def get_prev_close_index(security_id):
+    """
+    Previous day's close for any index using v2 daily historical charts. [web:42]
+    """
     try:
+        today = datetime.now(IST).date()
         to_d = datetime.now(IST).strftime("%Y-%m-%d")
-        from_d = (datetime.now(IST) - timedelta(days=10)).strftime("%Y-%m-%d")
+        from_d = (datetime.now(IST) - timedelta(days=20)).strftime("%Y-%m-%d")
 
-        res = dhan.historical_daily_data(str(security_id), "IDX_I", "INDEX", from_d, to_d)
+        url = f"{DHAN_V2_BASE}/charts/historical"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "access-token": access_token,
+        }
+        payload = {
+            "securityId": str(security_id),
+            "exchangeSegment": "IDX_I",
+            "instrument": "INDEX",
+            "expiryCode": 0,
+            "oi": False,
+            "fromDate": from_d,
+            "toDate": to_d,
+        }
 
-        if res.get("status") == "success" and "data" in res:
-            df = pd.DataFrame(res["data"])
-            if df.empty:
-                return 0.0
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=5)
+        if DEBUG_SHOW_ERRORS:
+            st.caption(f"v2 daily status {resp.status_code} for index {security_id}")
+        resp.raise_for_status()
+        data = resp.json()
 
-            time_col = "start_Time" if "start_Time" in df.columns else "timestamp"
-            df["date_str"] = df[time_col].astype(str).str[:10]
+        closes = data.get("close", [])
+        ts = data.get("timestamp", [])
+        if not closes or not ts:
+            return 0.0
 
-            today_str = datetime.now(IST).strftime("%Y-%m-%d")
-            past_df = df[df["date_str"] != today_str]
+        dates = [
+            datetime.fromtimestamp(t, tz=IST).date()
+            if isinstance(t, (int, float))
+            else datetime.fromtimestamp(float(t), tz=IST).date()
+            for t in ts
+        ]
 
-            if not past_df.empty:
-                return float(past_df.iloc[-1]["close"])
-    except Exception:
-        pass
-    return 0.0
+        past = [(d, c) for d, c in zip(dates, closes) if d < today]
+        if not past:
+            return 0.0
+
+        prev_close = float(past[-1][1])
+        return prev_close
+    except Exception as e:
+        if DEBUG_SHOW_ERRORS:
+            st.error(f"Index daily v2 error ({security_id}): {e}")
+        return 0.0
 
 
 def get_live_price(security_id):
@@ -517,17 +547,24 @@ def fetch_intraday_v2_futidx(security_id, from_d, to_d, interval_min=60):
         return pd.DataFrame()
     return _fetch_intraday_v2(security_id, "FUTIDX", from_d, to_d, interval_min)
 
-# --- 13. SCANNER WITH SCAN THROTTLING & CACHED RESULTS ---
+# --- 13. SCANNER WITH THROTTLING & INDEX TECH/OI ---
 @st.fragment(run_every=5)
 def refreshable_scanner():
     init_signal_history()
     now_scan = datetime.now(IST)
 
-    # init state containers
     if "last_scan" not in st.session_state:
         st.session_state["last_scan"] = None
     if "scan_in_progress" not in st.session_state:
         st.session_state["scan_in_progress"] = False
+
+    last = st.session_state["last_scan"]
+
+    # watchdog to avoid stuck state
+    if st.session_state["scan_in_progress"] and last is not None:
+        stuck_elapsed = (now_scan - last["time"]).total_seconds()
+        if stuck_elapsed > MIN_SCAN_GAP_SECONDS * 3:
+            st.session_state["scan_in_progress"] = False
 
     st.markdown("---")
     st.caption(
@@ -538,6 +575,12 @@ def refreshable_scanner():
     tab1, tab2 = st.tabs(["🚀 Signals", "📋 All Data"])
     targets = list(FNO_MAP.keys())
 
+    if not targets:
+        with tab1:
+            st.warning("Scanner paused: No symbols found.")
+        return
+
+    # throttling
     last = st.session_state["last_scan"]
     can_start_new = True
     if last is not None:
@@ -545,63 +588,110 @@ def refreshable_scanner():
         if elapsed < MIN_SCAN_GAP_SECONDS:
             can_start_new = False
 
-    # decide whether to scan
     do_scan = (
-        (last is None)  # never scanned
+        (last is None)
         or (can_start_new and not st.session_state["scan_in_progress"])
     )
-
-    if not targets:
-        with tab1:
-            st.warning("Scanner paused: No symbols found.")
-        return
 
     # --- PERFORM SCAN ONLY WHEN ALLOWED ---
     if do_scan:
         st.session_state["scan_in_progress"] = True
+        try:
+            scan_to = now_scan.strftime("%Y-%m-%d")
+            scan_from = (now_scan - timedelta(days=5)).strftime("%Y-%m-%d")
+            today = now_scan.date()
 
-        scan_to = now_scan.strftime("%Y-%m-%d")
-        scan_from = (now_scan - timedelta(days=5)).strftime("%Y-%m-%d")
-        today = now_scan.date()
+            # --- INDEX SUMMARY (Spot + FUTIDX tech + OI) ---
+            index_rows = []
+            for key, info in INDEX_MAP.items():
+                spot_id = info["id"]
+                name = info["name"]
 
-        # INDEX SUMMARY
-        index_rows = []
-        for key, info in INDEX_MAP.items():
-            spot_id = info["id"]
-            name = info["name"]
+                prev_close_idx = get_prev_close_index(spot_id)
+                ltp_idx = get_live_price(spot_id)
+                if prev_close_idx > 0 and ltp_idx > 0:
+                    day_pct = round(((ltp_idx - prev_close_idx) / prev_close_idx) * 100, 2)
+                else:
+                    day_pct = 0.0
 
-            prev_close_idx = get_prev_close_index(spot_id)
-            ltp_idx = get_live_price(spot_id)
+                fut_id = INDEX_FUT_MAP.get(key)
 
-            if prev_close_idx > 0 and ltp_idx > 0:
-                day_pct = round(((ltp_idx - prev_close_idx) / prev_close_idx) * 100, 2)
-            else:
-                day_pct = 0.0
+                fut_ltp = 0.0
+                mom = 0.0
+                p_chg = 0.0
+                rsi_val = 0.0
+                adx_val = 0.0
+                vol_ratio = 1.0
+                oi_chg = 0.0
+                oi_signal = "No OI Data ❔"
+                analysis = "Neutral ⚪"
+                bias = "Neutral"
 
-            fut_id = INDEX_FUT_MAP.get(key)
-            oi_chg = 0.0
-            oi_signal = "No OI Data ❔"
-            bias = "Neutral"
+                if fut_id:
+                    df_idx = fetch_intraday_v2_futidx(
+                        fut_id, scan_from, scan_to, interval_min=60
+                    )
+                    if not df_idx.empty:
+                        if len(df_idx) >= 14:
+                            df_idx["RSI"] = ta.rsi(df_idx["Close"], 14)
+                            adx_df = ta.adx(
+                                df_idx["High"], df_idx["Low"], df_idx["Close"], 14
+                            )
+                            df_idx["ADX"] = adx_df["ADX_14"]
+                            rsi_val = float(df_idx["RSI"].iloc[-1])
+                            adx_val = float(df_idx["ADX"].iloc[-1])
 
-            if fut_id:
-                df_idx = fetch_intraday_v2_futidx(
-                    fut_id, scan_from, scan_to, interval_min=60
-                )
-                if not df_idx.empty:
-                    oi_available = not (df_idx["OI"].max() == 0 and df_idx["OI"].min() == 0)
-                    if oi_available:
-                        day_df = df_idx[df_idx["datetime"].dt.date == today]
-                        if len(day_df) >= 2:
-                            day_first = day_df.iloc[0]
-                            day_last = day_df.iloc[-1]
-                            oi_start = float(day_first.get("OI", 0) or 0)
-                            oi_end = float(day_last.get("OI", 0) or 0)
-                            if oi_start > 0:
-                                oi_chg = round(((oi_end - oi_start) / oi_start) * 100, 2)
-                            else:
-                                oi_chg = 0.0
+                        if len(df_idx) >= 5:
+                            df_idx["EMA"] = ta.ema(df_idx["Close"], 5)
+                            mom = round(
+                                (
+                                    (df_idx["Close"].iloc[-1] - df_idx["EMA"].iloc[-1])
+                                    / df_idx["EMA"].iloc[-1]
+                                )
+                                * 100,
+                                2,
+                            )
 
-                        oi_signal = get_oi_signal(oi_chg, day_pct)
+                        curr_vol = float(df_idx["Volume"].iloc[-1])
+                        avg_vol = (
+                            df_idx["Volume"].rolling(10).mean().iloc[-1]
+                            if len(df_idx) > 10
+                            else curr_vol
+                        )
+                        vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
+
+                        curr = df_idx.iloc[-1]
+                        fut_ltp = float(curr["Close"])
+
+                        if len(df_idx) > 1:
+                            prev_bar = df_idx.iloc[-2]
+                            p_chg = round(
+                                ((fut_ltp - prev_bar["Close"]) / prev_bar["Close"]) * 100,
+                                2,
+                            )
+
+                        oi_available = not (
+                            df_idx["OI"].max() == 0 and df_idx["OI"].min() == 0
+                        )
+                        if oi_available:
+                            day_df = df_idx[df_idx["datetime"].dt.date == today]
+                            if len(day_df) >= 2:
+                                d_first = day_df.iloc[0]
+                                d_last = day_df.iloc[-1]
+                                oi_start = float(d_first.get("OI", 0) or 0)
+                                oi_end = float(d_last.get("OI", 0) or 0)
+                                if oi_start > 0:
+                                    oi_chg = round(
+                                        ((oi_end - oi_start) / oi_start) * 100, 2
+                                    )
+                                else:
+                                    oi_chg = 0.0
+
+                            oi_signal = get_oi_signal(oi_chg, day_pct)
+                        else:
+                            oi_signal = "No OI Data ❔"
+
+                        analysis = get_trend_analysis(p_chg, vol_ratio)
 
                         if "Buildup" in oi_signal:
                             if day_pct > 0.3:
@@ -609,197 +699,156 @@ def refreshable_scanner():
                             elif day_pct < -0.3:
                                 bias = "Bear"
 
-            index_rows.append(
-                {
-                    "Index": name,
-                    "Day %": day_pct,
-                    "OI Chg%": oi_chg,
-                    "OI Signal": oi_signal,
-                    "Bias": bias,
-                }
-            )
+                index_rows.append(
+                    {
+                        "Index": name,
+                        "LTP": round(fut_ltp or ltp_idx, 2),
+                        "Mom %": mom,
+                        "Price Chg%": p_chg,
+                        "Day Price%": day_pct,
+                        "RSI": round(rsi_val, 1),
+                        "ADX": round(adx_val, 1),
+                        "Vol Ratio": round(vol_ratio, 1),
+                        "OI Chg%": oi_chg,
+                        "OI Signal": oi_signal,
+                        "Analysis": analysis,
+                        "Bias": bias,
+                    }
+                )
 
-        # optional debug OI
-        if DEBUG_SHOW_ERRORS:
-            try:
-                nfut_id = INDEX_FUT_MAP.get("NIFTY")
-                if nfut_id:
-                    df_n = fetch_intraday_v2_futidx(
-                        nfut_id, scan_from, scan_to, interval_min=60
-                    )
-                    if not df_n.empty:
-                        st.write(
-                            "NIFTY FUT OI (last 10 bars):",
-                            df_n[["datetime", "OI"]].tail(10),
+            # optional OI debug
+            if DEBUG_SHOW_ERRORS:
+                try:
+                    nfut_id = INDEX_FUT_MAP.get("NIFTY")
+                    if nfut_id:
+                        df_n = fetch_intraday_v2_futidx(
+                            nfut_id, scan_from, scan_to, interval_min=60
                         )
+                        if not df_n.empty:
+                            st.write(
+                                "NIFTY FUT OI (last 10 bars):",
+                                df_n[["datetime", "OI"]].tail(10),
+                            )
 
-                sample_sym = next(iter(FNO_MAP.keys()))
-                sfut_id = FNO_MAP[sample_sym]["id"]
-                df_s = fetch_intraday_v2_futstk(
-                    sfut_id, scan_from, scan_to, interval_min=60
-                )
-                if not df_s.empty:
-                    st.write(
-                        f"{sample_sym} FUT OI (last 10 bars):",
-                        df_s[["datetime", "OI"]].tail(10),
+                    sample_sym = next(iter(FNO_MAP.keys()))
+                    sfut_id = FNO_MAP[sample_sym]["id"]
+                    df_s = fetch_intraday_v2_futstk(
+                        sfut_id, scan_from, scan_to, interval_min=60
                     )
-            except Exception as e:
-                st.error(f"Debug OI check failed: {e}")
+                    if not df_s.empty:
+                        st.write(
+                            f"{sample_sym} FUT OI (last 10 bars):",
+                            df_s[["datetime", "OI"]].tail(10),
+                        )
+                except Exception as e:
+                    st.error(f"Debug OI check failed: {e}")
 
-        bar = st.progress(0)
-        bull, bear, all_data = [], [], []
+            bar = st.progress(0)
+            bull, bear, all_data = [], [], []
 
-        for i, sym in enumerate(targets):
-            try:
-                sid = FNO_MAP[sym]["id"]
+            for i, sym in enumerate(targets):
+                try:
+                    sid = FNO_MAP[sym]["id"]
 
-                df = fetch_intraday_v2_futstk(sid, scan_from, scan_to, interval_min=60)
-                if df.empty:
-                    bar.progress((i + 1) / len(targets))
-                    continue
-
-                # indicators
-                if len(df) >= 14:
-                    df["RSI"] = ta.rsi(df["Close"], 14)
-                    adx_df = ta.adx(df["High"], df["Low"], df["Close"], 14)
-                    df["ADX"] = adx_df["ADX_14"]
-                    curr_rsi = float(df["RSI"].iloc[-1])
-                    curr_adx = float(df["ADX"].iloc[-1])
-                else:
-                    curr_rsi = 0.0
-                    curr_adx = 0.0
-
-                if len(df) >= 5:
-                    df["EMA"] = ta.ema(df["Close"], 5)
-                    mom = round(
-                        ((df["Close"].iloc[-1] - df["EMA"].iloc[-1]) / df["EMA"].iloc[-1])
-                        * 100,
-                        2,
+                    df = fetch_intraday_v2_futstk(
+                        sid, scan_from, scan_to, interval_min=60
                     )
-                else:
-                    mom = 0.0
+                    if df.empty:
+                        bar.progress((i + 1) / len(targets))
+                        continue
 
-                curr_vol = float(df["Volume"].iloc[-1])
-                avg_vol = (
-                    df["Volume"].rolling(10).mean().iloc[-1]
-                    if len(df) > 10
-                    else curr_vol
-                )
-                vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
+                    if len(df) >= 14:
+                        df["RSI"] = ta.rsi(df["Close"], 14)
+                        adx_df = ta.adx(df["High"], df["Low"], df["Close"], 14)
+                        df["ADX"] = adx_df["ADX_14"]
+                        curr_rsi = float(df["RSI"].iloc[-1])
+                        curr_adx = float(df["ADX"].iloc[-1])
+                    else:
+                        curr_rsi = 0.0
+                        curr_adx = 0.0
 
-                curr = df.iloc[-1]
-                ltp = float(curr["Close"])
+                    if len(df) >= 5:
+                        df["EMA"] = ta.ema(df["Close"], 5)
+                        mom = round(
+                            ((df["Close"].iloc[-1] - df["EMA"].iloc[-1])
+                             / df["EMA"].iloc[-1]) * 100,
+                            2,
+                        )
+                    else:
+                        mom = 0.0
 
-                if len(df) > 1:
-                    prev = df.iloc[-2]
-                    p_chg = round(
-                        ((ltp - prev["Close"]) / prev["Close"]) * 100,
-                        2,
+                    curr_vol = float(df["Volume"].iloc[-1])
+                    avg_vol = (
+                        df["Volume"].rolling(10).mean().iloc[-1]
+                        if len(df) > 10
+                        else curr_vol
                     )
-                else:
-                    p_chg = 0.0
+                    vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
 
-                prev_close = get_prev_close_futstk(sid)
-                if prev_close > 0:
-                    day_price_chg = round(((ltp - prev_close) / prev_close) * 100, 2)
-                else:
-                    day_price_chg = 0.0
+                    curr = df.iloc[-1]
+                    ltp = float(curr["Close"])
 
-                oi_available = not (df["OI"].max() == 0 and df["OI"].min() == 0)
+                    if len(df) > 1:
+                        prev = df.iloc[-2]
+                        p_chg = round(
+                            ((ltp - prev["Close"]) / prev["Close"]) * 100,
+                            2,
+                        )
+                    else:
+                        p_chg = 0.0
 
-                if oi_available:
-                    day_df = df[df["datetime"].dt.date == today]
-                    if len(day_df) >= 2:
-                        day_first = day_df.iloc[0]
-                        day_last = day_df.iloc[-1]
-                        oi_start = float(day_first.get("OI", 0) or 0)
-                        oi_end = float(day_last.get("OI", 0) or 0)
-                        if oi_start > 0:
-                            oi_chg = round(((oi_end - oi_start) / oi_start) * 100, 2)
+                    prev_close = get_prev_close_futstk(sid)
+                    if prev_close > 0:
+                        day_price_chg = round(((ltp - prev_close) / prev_close) * 100, 2)
+                    else:
+                        day_price_chg = 0.0
+
+                    oi_available = not (df["OI"].max() == 0 and df["OI"].min() == 0)
+
+                    if oi_available:
+                        day_df = df[df["datetime"].dt.date == today]
+                        if len(day_df) >= 2:
+                            day_first = day_df.iloc[0]
+                            day_last = day_df.iloc[-1]
+                            oi_start = float(day_first.get("OI", 0) or 0)
+                            oi_end = float(day_last.get("OI", 0) or 0)
+                            if oi_start > 0:
+                                oi_chg = round(
+                                    ((oi_end - oi_start) / oi_start) * 100, 2
+                                )
+                            else:
+                                oi_chg = 0.0
                         else:
                             oi_chg = 0.0
+
+                        oi_signal = get_oi_signal(oi_chg, day_price_chg)
                     else:
                         oi_chg = 0.0
+                        oi_signal = "No OI Data ❔"
 
-                    oi_signal = get_oi_signal(oi_chg, day_price_chg)
-                else:
-                    oi_chg = 0.0
-                    oi_signal = "No OI Data ❔"
+                    intraday_sent = get_trend_analysis(p_chg, vol_ratio)
 
-                intraday_sent = get_trend_analysis(p_chg, vol_ratio)
+                    row = {
+                        "Sym": sym,
+                        "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
+                        "LTP": round(ltp, 2),
+                        "Mom %": mom,
+                        "Price Chg%": p_chg,
+                        "Day Price%": day_price_chg,
+                        "RSI": round(curr_rsi, 1),
+                        "ADX": round(curr_adx, 1),
+                        "Vol Ratio": round(vol_ratio, 1),
+                        "OI Chg%": oi_chg,
+                        "OI Signal": oi_signal,
+                        "Analysis": intraday_sent,
+                    }
 
-                row = {
-                    "Sym": sym,
-                    "Symbol": f"https://in.tradingview.com/chart/?symbol=NSE:{sym}",
-                    "LTP": round(ltp, 2),
-                    "Mom %": mom,
-                    "Price Chg%": p_chg,
-                    "Day Price%": day_price_chg,
-                    "RSI": round(curr_rsi, 1),
-                    "ADX": round(curr_adx, 1),
-                    "Vol Ratio": round(vol_ratio, 1),
-                    "OI Chg%": oi_chg,
-                    "OI Signal": oi_signal,
-                    "Analysis": intraday_sent,
-                }
+                    r_m = row.copy()
+                    r_m["Sort"] = sym
+                    all_data.append(r_m)
 
-                r_m = row.copy()
-                r_m["Sort"] = sym
-                all_data.append(r_m)
-
-                # signal logic
-                if oi_available and "Buildup" in oi_signal:
-                    if day_price_chg > 0 and p_chg > 0:
-                        side = "bull"
-                        update_signal_history(side, sym, now_scan)
-                        strength_min = get_strength_minutes(side, sym, now_scan)
-                        conv, t_s, p_s, s_s = compute_conviction(
-                            side,
-                            curr_rsi,
-                            curr_adx,
-                            mom,
-                            vol_ratio,
-                            oi_chg,
-                            oi_signal,
-                            strength_min,
-                            day_price_chg,
-                            p_chg,
-                        )
-                        bull_row = row.copy()
-                        bull_row["Strength (min)"] = strength_min
-                        bull_row["TrendScore"] = t_s
-                        bull_row["PartScore"] = p_s
-                        bull_row["PersistScore"] = s_s
-                        bull_row["Conviction"] = conv
-                        bull.append(bull_row)
-
-                    if day_price_chg < 0 and p_chg < 0:
-                        side = "bear"
-                        update_signal_history(side, sym, now_scan)
-                        strength_min = get_strength_minutes(side, sym, now_scan)
-                        conv, t_s, p_s, s_s = compute_conviction(
-                            side,
-                            curr_rsi,
-                            curr_adx,
-                            mom,
-                            vol_ratio,
-                            oi_chg,
-                            oi_signal,
-                            strength_min,
-                            day_price_chg,
-                            p_chg,
-                        )
-                        bear_row = row.copy()
-                        bear_row["Strength (min)"] = strength_min
-                        bear_row["TrendScore"] = t_s
-                        bear_row["PartScore"] = p_s
-                        bear_row["PersistScore"] = s_s
-                        bear_row["Conviction"] = conv
-                        bear.append(bear_row)
-
-                else:
-                    if curr_rsi > 0:
-                        if p_chg > 0.3 and curr_rsi > 55 and vol_ratio > 1.1:
+                    if oi_available and "Buildup" in oi_signal:
+                        if day_price_chg > 0 and p_chg > 0:
                             side = "bull"
                             update_signal_history(side, sym, now_scan)
                             strength_min = get_strength_minutes(side, sym, now_scan)
@@ -823,7 +872,7 @@ def refreshable_scanner():
                             bull_row["Conviction"] = conv
                             bull.append(bull_row)
 
-                        elif p_chg < -0.3 and curr_rsi < 52 and vol_ratio > 1.1:
+                        if day_price_chg < 0 and p_chg < 0:
                             side = "bear"
                             update_signal_history(side, sym, now_scan)
                             strength_min = get_strength_minutes(side, sym, now_scan)
@@ -847,25 +896,75 @@ def refreshable_scanner():
                             bear_row["Conviction"] = conv
                             bear.append(bear_row)
 
-            except Exception as e:
-                if DEBUG_SHOW_ERRORS and "scan_error_shown" not in st.session_state:
-                    st.session_state["scan_error_shown"] = True
-                    st.error(f"Error while scanning {sym}: {e}")
+                    else:
+                        if curr_rsi > 0:
+                            if p_chg > 0.3 and curr_rsi > 55 and vol_ratio > 1.1:
+                                side = "bull"
+                                update_signal_history(side, sym, now_scan)
+                                strength_min = get_strength_minutes(side, sym, now_scan)
+                                conv, t_s, p_s, s_s = compute_conviction(
+                                    side,
+                                    curr_rsi,
+                                    curr_adx,
+                                    mom,
+                                    vol_ratio,
+                                    oi_chg,
+                                    oi_signal,
+                                    strength_min,
+                                    day_price_chg,
+                                    p_chg,
+                                )
+                                bull_row = row.copy()
+                                bull_row["Strength (min)"] = strength_min
+                                bull_row["TrendScore"] = t_s
+                                bull_row["PartScore"] = p_s
+                                bull_row["PersistScore"] = s_s
+                                bull_row["Conviction"] = conv
+                                bull.append(bull_row)
 
-            time.sleep(0.12)
-            bar.progress((i + 1) / len(targets))
+                            elif p_chg < -0.3 and curr_rsi < 52 and vol_ratio > 1.1:
+                                side = "bear"
+                                update_signal_history(side, sym, now_scan)
+                                strength_min = get_strength_minutes(side, sym, now_scan)
+                                conv, t_s, p_s, s_s = compute_conviction(
+                                    side,
+                                    curr_rsi,
+                                    curr_adx,
+                                    mom,
+                                    vol_ratio,
+                                    oi_chg,
+                                    oi_signal,
+                                    strength_min,
+                                    day_price_chg,
+                                    p_chg,
+                                )
+                                bear_row = row.copy()
+                                bear_row["Strength (min)"] = strength_min
+                                bear_row["TrendScore"] = t_s
+                                bear_row["PartScore"] = p_s
+                                bear_row["PersistScore"] = s_s
+                                bear_row["Conviction"] = conv
+                                bear.append(bear_row)
 
-        bar.empty()
+                except Exception as e:
+                    if DEBUG_SHOW_ERRORS and "scan_error_shown" not in st.session_state:
+                        st.session_state["scan_error_shown"] = True
+                        st.error(f"Error while scanning {sym}: {e}")
 
-        # store results only after full scan completes
-        st.session_state["last_scan"] = {
-            "time": now_scan,
-            "index_rows": index_rows,
-            "bull": bull,
-            "bear": bear,
-            "all_data": all_data,
-        }
-        st.session_state["scan_in_progress"] = False
+                time.sleep(0.12)
+                bar.progress((i + 1) / len(targets))
+
+            bar.empty()
+
+            st.session_state["last_scan"] = {
+                "time": now_scan,
+                "index_rows": index_rows,
+                "bull": bull,
+                "bear": bear,
+                "all_data": all_data,
+            }
+        finally:
+            st.session_state["scan_in_progress"] = False
 
     # --- RENDER FROM CACHED RESULTS ---
     last = st.session_state["last_scan"]
@@ -880,11 +979,12 @@ def refreshable_scanner():
     all_data = last["all_data"]
     last_time = last["time"]
 
-    # countdown info
     elapsed = (now_scan - last_time).total_seconds()
     remaining = max(0, MIN_SCAN_GAP_SECONDS - int(elapsed))
     if remaining > 0:
-        st.caption(f"Next scan in ~{remaining}s (last scan at {last_time.strftime('%H:%M:%S')} IST)")
+        st.caption(
+            f"Next scan in ~{remaining}s (last scan at {last_time.strftime('%H:%M:%S')} IST)"
+        )
 
     cfg = {
         "Symbol": st.column_config.LinkColumn(
@@ -917,6 +1017,12 @@ def refreshable_scanner():
         st.subheader("Indices")
         if index_rows:
             df_idx = pd.DataFrame(index_rows)
+            cols = [
+                "Index", "LTP", "Mom %", "Price Chg%", "Day Price%",
+                "RSI", "ADX", "Vol Ratio", "OI Chg%", "OI Signal",
+                "Analysis", "Bias",
+            ]
+            df_idx = df_idx[[c for c in cols if c in df_idx.columns]]
             st.dataframe(
                 df_idx,
                 use_container_width=True,
