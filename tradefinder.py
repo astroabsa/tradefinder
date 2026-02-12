@@ -23,11 +23,11 @@ AUTH_CSV_URL = (
 def authenticate_user(user_in, pw_in):
     try:
         df = pd.read_csv(AUTH_CSV_URL)
-        df['username'] = df['username'].astype(str).str.strip().str.lower()
-        df['password'] = df['password'].astype(str).str.strip()
+        df["username"] = df["username"].astype(str).str.strip().str.lower()
+        df["password"] = df["password"].astype(str).str.strip()
         match = df[
-            (df['username'] == str(user_in).strip().lower())
-            & (df['password'] == str(pw_in).strip())
+            (df["username"] == str(user_in).strip().lower())
+            & (df["password"] == str(pw_in).strip())
         ]
         return not match.empty
     except Exception:
@@ -55,7 +55,7 @@ if st.sidebar.button("Log out"):
     st.session_state["authenticated"] = False
     st.rerun()
 
-DEBUG_SHOW_ERRORS = st.sidebar.checkbox("Show API debug info", value=False)
+DEBUG_SHOW_ERRORS = st.sidebar.checkbox("Show API / OI debug info", value=False)
 
 # --- 4. API CONNECTION ---
 dhan = None
@@ -71,9 +71,9 @@ DHAN_V2_BASE = "https://api.dhan.co/v2"  # v2 REST base URL
 
 # --- 5. INDEX MAP (spot indices) ---
 INDEX_MAP = {
-    'NIFTY': {'id': '13', 'name': 'NIFTY 50'},
-    'BANKNIFTY': {'id': '25', 'name': 'BANK NIFTY'},
-    'SENSEX': {'id': '51', 'name': 'SENSEX'},
+    "NIFTY": {"id": "13", "name": "NIFTY 50"},
+    "BANKNIFTY": {"id": "25", "name": "BANK NIFTY"},
+    "SENSEX": {"id": "51", "name": "SENSEX"},
 }
 
 # --- 6. MASTER LIST LOADERS ---
@@ -85,14 +85,14 @@ def get_fno_stock_map():
         return fno_map
 
     try:
-        df = pd.read_csv("dhan_master.csv", on_bad_lines='skip', low_memory=False)
+        df = pd.read_csv("dhan_master.csv", on_bad_lines="skip", low_memory=False)
         df.columns = df.columns.str.strip()
 
-        col_exch = 'SEM_EXM_EXCH_ID'
-        col_id = 'SEM_SMST_SECURITY_ID'
-        col_name = 'SEM_TRADING_SYMBOL'
-        col_inst = 'SEM_INSTRUMENT_NAME'
-        col_expiry = 'SEM_EXPIRY_DATE'
+        col_exch = "SEM_EXM_EXCH_ID"
+        col_id = "SEM_SMST_SECURITY_ID"
+        col_name = "SEM_TRADING_SYMBOL"
+        col_inst = "SEM_INSTRUMENT_NAME"
+        col_expiry = "SEM_EXPIRY_DATE"
 
         if col_name in df.columns:
             df[col_name] = df[col_name].astype(str).str.upper().str.strip()
@@ -102,23 +102,23 @@ def get_fno_stock_map():
             df[col_inst] = df[col_inst].astype(str).str.strip()
 
         if col_exch in df.columns and col_inst in df.columns:
-            stk_df = df[(df[col_exch] == 'NSE') & (df[col_inst] == 'FUTSTK')].copy()
+            stk_df = df[(df[col_exch] == "NSE") & (df[col_inst] == "FUTSTK")].copy()
 
             if col_expiry in stk_df.columns:
                 stk_df[col_expiry] = stk_df[col_expiry].astype(str)
-                stk_df['dt_parsed'] = pd.to_datetime(
-                    stk_df[col_expiry], dayfirst=True, errors='coerce'
+                stk_df["dt_parsed"] = pd.to_datetime(
+                    stk_df[col_expiry], dayfirst=True, errors="coerce"
                 )
 
                 today = pd.Timestamp.now().normalize()
-                valid_futures = stk_df[stk_df['dt_parsed'] >= today]
-                valid_futures = valid_futures.sort_values(by=[col_name, 'dt_parsed'])
-                curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep='first')
+                valid_futures = stk_df[stk_df["dt_parsed"] >= today]
+                valid_futures = valid_futures.sort_values(by=[col_name, "dt_parsed"])
+                curr_stk = valid_futures.drop_duplicates(subset=[col_name], keep="first")
 
                 for _, row in curr_stk.iterrows():
-                    base_sym = row[col_name].split('-')[0]
-                    disp_name = row.get('SEM_CUSTOM_SYMBOL', row[col_name])
-                    fno_map[base_sym] = {'id': str(row[col_id]), 'name': disp_name}
+                    base_sym = row[col_name].split("-")[0]
+                    disp_name = row.get("SEM_CUSTOM_SYMBOL", row[col_name])
+                    fno_map[base_sym] = {"id": str(row[col_id]), "name": disp_name}
     except Exception as e:
         st.error(f"Error reading CSV: {e}")
     return fno_map
@@ -128,7 +128,7 @@ def get_fno_stock_map():
 def get_index_fut_ids():
     """
     Auto-detect current (nearest non‑expired) index futures IDs (FUTIDX)
-    for NIFTY, BANKNIFTY, SENSEX from dhan_master.csv. [web:47][web:140]
+    for NIFTY, BANKNIFTY, SENSEX from dhan_master.csv. [web:47][web:49]
     """
     ids = {"NIFTY": None, "BANKNIFTY": None, "SENSEX": None}
 
@@ -186,24 +186,24 @@ with st.spinner("Loading Stock List..."):
 # --- 7. DAILY HELPERS (indices & FUTSTK) ---
 def get_prev_close_index(security_id):
     try:
-        to_d = datetime.now(IST).strftime('%Y-%m-%d')
-        from_d = (datetime.now(IST) - timedelta(days=10)).strftime('%Y-%m-%d')
+        to_d = datetime.now(IST).strftime("%Y-%m-%d")
+        from_d = (datetime.now(IST) - timedelta(days=10)).strftime("%Y-%m-%d")
 
         res = dhan.historical_daily_data(str(security_id), "IDX_I", "INDEX", from_d, to_d)
 
-        if res.get('status') == 'success' and 'data' in res:
-            df = pd.DataFrame(res['data'])
+        if res.get("status") == "success" and "data" in res:
+            df = pd.DataFrame(res["data"])
             if df.empty:
                 return 0.0
 
-            time_col = 'start_Time' if 'start_Time' in df.columns else 'timestamp'
-            df['date_str'] = df[time_col].astype(str).str[:10]
+            time_col = "start_Time" if "start_Time" in df.columns else "timestamp"
+            df["date_str"] = df[time_col].astype(str).str[:10]
 
-            today_str = datetime.now(IST).strftime('%Y-%m-%d')
-            past_df = df[df['date_str'] != today_str]
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            past_df = df[df["date_str"] != today_str]
 
             if not past_df.empty:
-                return float(past_df.iloc[-1]['close'])
+                return float(past_df.iloc[-1]["close"])
     except Exception:
         pass
     return 0.0
@@ -211,12 +211,12 @@ def get_prev_close_index(security_id):
 
 def get_live_price(security_id):
     try:
-        to_d = datetime.now(IST).strftime('%Y-%m-%d')
-        from_d = (datetime.now(IST) - timedelta(days=3)).strftime('%Y-%m-%d')
+        to_d = datetime.now(IST).strftime("%Y-%m-%d")
+        from_d = (datetime.now(IST) - timedelta(days=3)).strftime("%Y-%m-%d")
 
         res = dhan.intraday_minute_data(str(security_id), "IDX_I", "INDEX", from_d, to_d, 1)
-        if res.get('status') == 'success' and 'data' in res:
-            closes = res['data']['close']
+        if res.get("status") == "success" and "data" in res:
+            closes = res["data"]["close"]
             if len(closes) > 0:
                 return float(closes[-1])
     except Exception:
@@ -226,34 +226,34 @@ def get_live_price(security_id):
 
 def get_prev_close_futstk(security_id):
     try:
-        to_d = datetime.now(IST).strftime('%Y-%m-%d')
-        from_d = (datetime.now(IST) - timedelta(days=10)).strftime('%Y-%m-%d')
+        to_d = datetime.now(IST).strftime("%Y-%m-%d")
+        from_d = (datetime.now(IST) - timedelta(days=10)).strftime("%Y-%m-%d")
 
         res = dhan.historical_daily_data(str(security_id), "NSE_FNO", "FUTSTK", from_d, to_d)
-        if res.get('status') == 'success' and 'data' in res:
-            df = pd.DataFrame(res['data'])
+        if res.get("status") == "success" and "data" in res:
+            df = pd.DataFrame(res["data"])
             if df.empty:
                 return 0.0
 
-            time_col = 'start_Time' if 'start_Time' in df.columns else 'timestamp'
-            df['date_str'] = df[time_col].astype(str).str[:10]
+            time_col = "start_Time" if "start_Time" in df.columns else "timestamp"
+            df["date_str"] = df[time_col].astype(str).str[:10]
 
-            today_str = datetime.now(IST).strftime('%Y-%m-%d')
-            past_df = df[df['date_str'] != today_str]
+            today_str = datetime.now(IST).strftime("%Y-%m-%d")
+            past_df = df[df["date_str"] != today_str]
 
             if not past_df.empty:
-                return float(past_df.iloc[-1]['close'])
+                return float(past_df.iloc[-1]["close"])
     except Exception:
         pass
     return 0.0
 
-# --- 8. DASHBOARD (unchanged indices metrics) ---
+# --- 8. DASHBOARD ---
 @st.fragment(run_every=5)
 def refreshable_dashboard():
     data = {}
 
     for key, info in INDEX_MAP.items():
-        sid = info['id']
+        sid = info["id"]
 
         prev = get_prev_close_index(sid)
         ltp = get_live_price(sid)
@@ -270,7 +270,7 @@ def refreshable_dashboard():
             chg = ltp - prev
             pct = (chg / prev) * 100
 
-        data[info['name']] = {"ltp": ltp, "chg": chg, "pct": pct}
+        data[info["name"]] = {"ltp": ltp, "chg": chg, "pct": pct}
 
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1.2])
     with c1:
@@ -436,7 +436,7 @@ def compute_conviction(
     return min(100, total), t_score, p_score, s_score
 
 # --- 13. v2 INTRADAY FETCH WITH OI (FUTSTK + FUTIDX) ---
-def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
+def _fetch_intraday_v2(security_id, instrument, from_d, to_d, interval_min=60):
     url = f"{DHAN_V2_BASE}/charts/intraday"
     headers = {
         "Accept": "application/json",
@@ -446,7 +446,7 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     payload = {
         "securityId": str(security_id),
         "exchangeSegment": "NSE_FNO",
-        "instrument": "FUTSTK",
+        "instrument": instrument,  # FUTSTK or FUTIDX
         "expiryCode": 0,
         "oi": True,
         "fromDate": from_d,
@@ -457,13 +457,13 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     try:
         resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=5)
         if DEBUG_SHOW_ERRORS:
-            st.caption(f"v2 status {resp.status_code} for FUTSTK {security_id}")
+            st.caption(f"v2 status {resp.status_code} for {instrument} {security_id}")
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
-        if DEBUG_SHOW_ERRORS and "dhan_v2_error_shown" not in st.session_state:
-            st.session_state["dhan_v2_error_shown"] = True
-            st.error(f"Dhan v2 intraday error (FUTSTK {security_id}): {e}")
+        if DEBUG_SHOW_ERRORS and "dhan_v2_error_once" not in st.session_state:
+            st.session_state["dhan_v2_error_once"] = True
+            st.error(f"Dhan v2 intraday error ({instrument} {security_id}): {e}")
         return pd.DataFrame()
 
     closes = data.get("close", [])
@@ -508,84 +508,15 @@ def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
     )
     return df
 
+def fetch_intraday_v2_futstk(security_id, from_d, to_d, interval_min=60):
+    return _fetch_intraday_v2(security_id, "FUTSTK", from_d, to_d, interval_min)
 
 def fetch_intraday_v2_futidx(security_id, from_d, to_d, interval_min=60):
-    """
-    Intraday OHLCV + OI for index futures (FUTIDX) via Dhan v2.
-    Used only for index OI / buildup view.
-    """
     if not security_id:
         return pd.DataFrame()
+    return _fetch_intraday_v2(security_id, "FUTIDX", from_d, to_d, interval_min)
 
-    url = f"{DHAN_V2_BASE}/charts/intraday"
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "access-token": access_token,
-    }
-    payload = {
-        "securityId": str(security_id),
-        "exchangeSegment": "NSE_FNO",
-        "instrument": "FUTIDX",
-        "expiryCode": 0,
-        "oi": True,
-        "fromDate": from_d,
-        "toDate": to_d,
-        "interval": int(interval_min),
-    }
-
-    try:
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=5)
-        if DEBUG_SHOW_ERRORS:
-            st.caption(f"v2 status {resp.status_code} for FUTIDX {security_id}")
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return pd.DataFrame()
-
-    closes = data.get("close", [])
-    if not closes:
-        return pd.DataFrame()
-
-    opens = data.get("open", [])
-    highs = data.get("high", [])
-    lows = data.get("low", [])
-    vols = data.get("volume", [])
-    ts = data.get("timestamp", [])
-    oi = data.get("open_interest", [])
-
-    n = len(closes)
-
-    def safe_list(lst):
-        return lst if len(lst) == n else (lst + [lst[-1]] * (n - len(lst)) if lst else [0] * n)
-
-    opens = safe_list(opens)
-    highs = safe_list(highs)
-    lows = safe_list(lows)
-    vols = safe_list(vols)
-    ts = safe_list(ts)
-    oi = safe_list(oi)
-
-    dt_index = [
-        datetime.fromtimestamp(t, tz=IST) if isinstance(t, (int, float)) else
-        datetime.fromtimestamp(float(t), tz=IST)
-        for t in ts
-    ]
-
-    df = pd.DataFrame(
-        {
-            "datetime": dt_index,
-            "Open": opens,
-            "High": highs,
-            "Low": lows,
-            "Close": closes,
-            "Volume": vols,
-            "OI": oi,
-        }
-    )
-    return df
-
-# --- 14. SCANNER (v2 + strength + conviction, indices row) ---
+# --- 14. SCANNER (v2 + strength + conviction, indices row + OI debug) ---
 @st.fragment(run_every=180)
 def refreshable_scanner():
     init_signal_history()
@@ -604,8 +535,8 @@ def refreshable_scanner():
         return
 
     # Common date window for intraday fetches
-    scan_to = now_scan.strftime('%Y-%m-%d')
-    scan_from = (now_scan - timedelta(days=5)).strftime('%Y-%m-%d')
+    scan_to = now_scan.strftime("%Y-%m-%d")
+    scan_from = (now_scan - timedelta(days=5)).strftime("%Y-%m-%d")
     today = now_scan.date()
 
     # --- INDEX SUMMARY (spot + FUTIDX OI) ---
@@ -660,75 +591,72 @@ def refreshable_scanner():
                 "Bias": bias,
             }
         )
-    if DEBUG_SHOW_ERRORS:
-    # Pick one index future and one stock future to inspect raw OI
-    try:
-        # NIFTY FUTIDX
-        nfut_id = INDEX_FUT_MAP.get("NIFTY")
-        if nfut_id:
-            df_n = fetch_intraday_v2_futidx(nfut_id, scan_from, scan_to, interval_min=60)
-            if not df_n.empty:
-                st.write("NIFTY FUT OI (last 10):", df_n[["datetime", "OI"]].tail(10))
 
-        # One stock FUTSTK from your bulls list
-        sample_sym = next(iter(FNO_MAP.keys()))
-        sfut_id = FNO_MAP[sample_sym]["id"]
-        df_s = fetch_intraday_v2_futstk(sfut_id, scan_from, scan_to, interval_min=60)
-        if not df_s.empty:
-            st.write(f"{sample_sym} FUT OI (last 10):", df_s[["datetime", "OI"]].tail(10))
-    except Exception as e:
-        st.error(f"Debug OI check failed: {e}")
+    # --- OPTIONAL: RAW OI DEBUG (one index future + one stock future) ---
+    if DEBUG_SHOW_ERRORS:
+        try:
+            nfut_id = INDEX_FUT_MAP.get("NIFTY")
+            if nfut_id:
+                df_n = fetch_intraday_v2_futidx(nfut_id, scan_from, scan_to, interval_min=60)
+                if not df_n.empty:
+                    st.write("NIFTY FUT OI (last 10 bars):", df_n[["datetime", "OI"]].tail(10))
+
+            # sample stock future = first key in FNO_MAP
+            sample_sym = next(iter(FNO_MAP.keys()))
+            sfut_id = FNO_MAP[sample_sym]["id"]
+            df_s = fetch_intraday_v2_futstk(sfut_id, scan_from, scan_to, interval_min=60)
+            if not df_s.empty:
+                st.write(f"{sample_sym} FUT OI (last 10 bars):", df_s[["datetime", "OI"]].tail(10))
+        except Exception as e:
+            st.error(f"Debug OI check failed: {e}")
 
     bar = st.progress(0)
     bull, bear, all_data = [], [], []
 
     for i, sym in enumerate(targets):
         try:
-            sid = FNO_MAP[sym]['id']
+            sid = FNO_MAP[sym]["id"]
 
-            to_d = scan_to
-            from_d = scan_from
-
-            df = fetch_intraday_v2_futstk(sid, from_d, to_d, interval_min=60)
+            df = fetch_intraday_v2_futstk(sid, scan_from, scan_to, interval_min=60)
             if df.empty:
                 bar.progress((i + 1) / len(targets))
                 continue
 
             # --- TECH INDICATORS ---
             if len(df) >= 14:
-                df['RSI'] = ta.rsi(df['Close'], 14)
-                adx_df = ta.adx(df['High'], df['Low'], df['Close'], 14)
-                df['ADX'] = adx_df['ADX_14']
-                curr_rsi = float(df['RSI'].iloc[-1])
-                curr_adx = float(df['ADX'].iloc[-1])
+                df["RSI"] = ta.rsi(df["Close"], 14)
+                adx_df = ta.adx(df["High"], df["Low"], df["Close"], 14)
+                df["ADX"] = adx_df["ADX_14"]
+                curr_rsi = float(df["RSI"].iloc[-1])
+                curr_adx = float(df["ADX"].iloc[-1])
             else:
                 curr_rsi = 0.0
                 curr_adx = 0.0
 
             if len(df) >= 5:
-                df['EMA'] = ta.ema(df['Close'], 5)
+                df["EMA"] = ta.ema(df["Close"], 5)
                 mom = round(
-                    ((df['Close'].iloc[-1] - df['EMA'].iloc[-1]) / df['EMA'].iloc[-1]) * 100,
+                    ((df["Close"].iloc[-1] - df["EMA"].iloc[-1]) / df["EMA"].iloc[-1]) * 100,
                     2,
                 )
             else:
                 mom = 0.0
 
-            curr_vol = float(df['Volume'].iloc[-1])
+            curr_vol = float(df["Volume"].iloc[-1])
             avg_vol = (
-                df['Volume'].rolling(10).mean().iloc[-1]
+                df["Volume"].rolling(10).mean().iloc[-1]
                 if len(df) > 10
                 else curr_vol
             )
             vol_ratio = (curr_vol / avg_vol) if avg_vol > 0 else 1.0
 
             curr = df.iloc[-1]
-            ltp = float(curr['Close'])
+            ltp = float(curr["Close"])
 
             if len(df) > 1:
                 prev = df.iloc[-2]
                 p_chg = round(
-                    ((ltp - prev['Close']) / prev['Close']) * 100,
+                    ((ltp - prev["Close"]) / prev["Close"]) * 100,
                     2,
                 )
             else:
@@ -742,16 +670,16 @@ def refreshable_scanner():
                 day_price_chg = 0.0
 
             # --- INTRADAY OI CHANGE FOR TODAY ---
-            oi_available = not (df['OI'].max() == 0 and df['OI'].min() == 0)
+            oi_available = not (df["OI"].max() == 0 and df["OI"].min() == 0)
 
             if oi_available:
-                day_df = df[df['datetime'].dt.date == today]
+                day_df = df[df["datetime"].dt.date == today]
                 if len(day_df) >= 2:
                     day_first = day_df.iloc[0]
                     day_last = day_df.iloc[-1]
 
-                    oi_start = float(day_first.get('OI', 0) or 0)
-                    oi_end = float(day_last.get('OI', 0) or 0)
+                    oi_start = float(day_first.get("OI", 0) or 0)
+                    oi_end = float(day_last.get("OI", 0) or 0)
                     if oi_start > 0:
                         oi_chg = round(((oi_end - oi_start) / oi_start) * 100, 2)
                     else:
