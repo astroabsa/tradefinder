@@ -660,6 +660,24 @@ def refreshable_scanner():
                 "Bias": bias,
             }
         )
+    if DEBUG_SHOW_ERRORS:
+    # Pick one index future and one stock future to inspect raw OI
+    try:
+        # NIFTY FUTIDX
+        nfut_id = INDEX_FUT_MAP.get("NIFTY")
+        if nfut_id:
+            df_n = fetch_intraday_v2_futidx(nfut_id, scan_from, scan_to, interval_min=60)
+            if not df_n.empty:
+                st.write("NIFTY FUT OI (last 10):", df_n[["datetime", "OI"]].tail(10))
+
+        # One stock FUTSTK from your bulls list
+        sample_sym = next(iter(FNO_MAP.keys()))
+        sfut_id = FNO_MAP[sample_sym]["id"]
+        df_s = fetch_intraday_v2_futstk(sfut_id, scan_from, scan_to, interval_min=60)
+        if not df_s.empty:
+            st.write(f"{sample_sym} FUT OI (last 10):", df_s[["datetime", "OI"]].tail(10))
+    except Exception as e:
+        st.error(f"Debug OI check failed: {e}")
 
     bar = st.progress(0)
     bull, bear, all_data = [], [], []
